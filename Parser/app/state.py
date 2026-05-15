@@ -38,9 +38,9 @@ class ReportState(TypedDict, total=False):
     """
     # --- Inputs ---
     pdf_path: str                        # Path to the uploaded PDF
-    patient_name_hint: Optional[str]    # Optional override from API caller
-    patient_age_hint: Optional[str]
-    patient_gender_hint: Optional[str]
+    patient_name: Optional[str]    # Optional override from API caller
+    patient_age: Optional[str]
+    patient_gender: Optional[str]
 
     # --- Node outputs ---
     raw_text: str                        # Raw text extracted from PDF pages

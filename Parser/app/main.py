@@ -1,13 +1,10 @@
 """
-app/main.py — FastAPI application for Task 1J: Lab Report Parser.
+app/main.py — FastAPI application for Lab Report Parser.
 
 Endpoints:
   POST /parse-report   — Main endpoint: PDF in, structured JSON out
   GET  /health         — Health check
   GET  /               — API info
-
-Run with:
-  uvicorn app.main:app --reload --port 8001
 """
 
 import logging
@@ -39,10 +36,10 @@ logger = logging.getLogger(__name__)
 # FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="FellowAI — Lab Report Parser (Task 1)",
+    title="ClinicAI — Medical Report Parser",
     description=(
         "Extracts patient demographics, lab values, abnormal flags, and a "
-        "plain-English doctor summary from a blood report PDF. "
+        "plain-English doctor summary from a medical report PDF. "
     ),
 )
 
@@ -86,12 +83,11 @@ class ParseReportResponse(BaseModel):
 @app.get("/")
 def root():
     return {
-        "service": "FellowAI Lab Report Parser",
-        "task": "1",
+        "service": "ClinicAI Medical Report Parser",
         "endpoints": {
-            "POST /parse-report": "Parse a lab report PDF",
+            "POST /parse-report": "Parse a medical report PDF",
             "GET /health": "Health check",
-            "GET /docs": "Swagger UI"
+            "GET /docs": "API documentation (Swagger UI)"
         },
     }
 
@@ -99,10 +95,11 @@ def root():
 @app.get("/health")
 def health():
     api_key_set = bool(os.getenv("GROQ_API_KEY"))
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     return {
         "status": "ok",
         "groq_api_key_configured": api_key_set,
-        "model": os.getenv("GROQ_MODEL"),
+        "model": model,
     }
 
 
@@ -131,6 +128,7 @@ async def parse_report(
             detail="GROQ_API_KEY is not set. Please configure it in .env",
         )
 
+    tmp_path = None
     # Save uploaded file to a temp path (LangGraph node reads from disk)
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -186,7 +184,8 @@ async def parse_report(
 
     finally:
         # Always clean up temp file
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass

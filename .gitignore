@@ -1,5 +1,111 @@
+# ========================
+# Python
+# ========================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+eggs/
+*.whl
+sdist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ========================
+# Environment & Secrets
+# ========================
 .env
-venv/*
-__pycache__/*
-tests/*
-.pytest_cache/*
+.env.*
+!.env.example
+
+# ========================
+# Testing
+# ========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Generated test PDFs or artifacts
+tests/sample_reports/generated/
+tests/*.pdf
+
+# ========================
+# IDE & Editor
+# ========================
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (PyCharm, etc.)
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+
+# ========================
+# OS Generated
+# ========================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*.directory
+
+# ========================
+# Database
+# ========================
+*.db
+*.sqlite3
+
+# ========================
+# Logs & Misc
+# ========================
+*.log
+logs/
+
+# mypy / type-checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff / linting
+.ruff_cache/

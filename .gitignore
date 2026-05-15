@@ -21,4 +21,4 @@ venv/
 .pytest_cache/
 
 # Generated test PDFs or artifacts
-tests/sample_reports/sample_reports/
+Parser/tests/sample_reports/

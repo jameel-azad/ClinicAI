@@ -23,8 +23,8 @@ from pydantic import BaseModel
 # Load .env before anything else
 load_dotenv()
 
-from app.pipeline import lab_report_pipeline
-from app.state import ReportState
+from Parser.app.pipeline import lab_report_pipeline
+from Parser.app.state import ReportState
 
 # ---------------------------------------------------------------------------
 # Logging

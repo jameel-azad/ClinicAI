@@ -21,34 +21,44 @@ async def webhook_health():
 async def twilio_webhook(
     request: Request,
     From: str = Form(...),        # e.g. "whatsapp:+917766862219"
-    Body: str = Form(...),        # The patient's message text
+    Body: str = Form(""),         # The patient's message text
     NumMedia: str = Form("0"),    # Number of media attachments
+    MediaUrl0: str = Form(None),
+    MediaContentType0: str = Form(None),
 ):
     # Normalise the from number — strip "whatsapp:" prefix for internal use
     from_number = From.replace("whatsapp:", "").strip()
     message_text = Body.strip()
 
-    print(f"\n[Webhook] From: {from_number} | Message: {message_text}")
+    print(f"\n[Webhook] From: {from_number} | Message: {message_text} | Media: {NumMedia}")
 
-    # ── Run the booking graph ──────────────────────────────────────────────────
-    config = {"configurable": {"thread_id": from_number}}
-    state_update = {
-        "from_number": from_number,
-        "incoming_message": message_text,
-    }
+    reply = ""
 
-    try:
-        final_state = booking_graph.invoke(state_update, config=config)
-        reply = final_state.get("reply_message", "")
-        pipeline = final_state.get("pipeline_log", [])
-        print(f"[Graph] Pipeline: {' → '.join(n.split(':')[0] for n in pipeline)}")
-        print(f"[Graph] Reply: {reply[:80]}...")
-    except Exception as e:
-        print(f"[ERROR] Booking graph failed: {e}")
-        reply = (
-            "Sorry, we're experiencing a technical issue. "
-            "Please try again or call the clinic directly."
-        )
+    # ── Check for PDF media ────────────────────────────────────────────────────
+    if NumMedia != "0" and MediaUrl0 and MediaContentType0 == "application/pdf":
+        print(f"[Webhook] Received PDF: {MediaUrl0}")
+        from app.services.pdf_service import handle_incoming_pdf
+        reply = await handle_incoming_pdf(MediaUrl0)
+    else:
+        # ── Run the booking graph ──────────────────────────────────────────────────
+        config = {"configurable": {"thread_id": from_number}}
+        state_update = {
+            "from_number": from_number,
+            "incoming_message": message_text,
+        }
+
+        try:
+            final_state = booking_graph.invoke(state_update, config=config)
+            reply = final_state.get("reply_message", "")
+            pipeline = final_state.get("pipeline_log", [])
+            print(f"[Graph] Pipeline: {' → '.join(n.split(':')[0] for n in pipeline)}")
+            print(f"[Graph] Reply: {reply[:80]}...")
+        except Exception as e:
+            print(f"[ERROR] Booking graph failed: {e}")
+            reply = (
+                "Sorry, we're experiencing a technical issue. "
+                "Please try again or call the clinic directly."
+            )
 
     # ── Send reply via Twilio ──────────────────────────────────────────────────
     if reply:

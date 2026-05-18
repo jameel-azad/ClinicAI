@@ -210,21 +210,43 @@ def _flag_value(value_str: str, reference_range: str) -> str:
     """
     Determine status for a single test value based on reference range.
 
-    Returns: NORMAL | HIGH | LOW
+    Returns: NORMAL | HIGH | LOW | ABNORMAL
     """
+    val_str = value_str.strip().lower()
+    ref_str = reference_range.strip().lower()
+
+    if not val_str:
+        return "NORMAL"
+
     try:
-        val = float(re.sub(r"[^\d.]", "", value_str))
+        val_clean = re.sub(r"[^\d.]", "", value_str)
+        if not val_clean:
+            raise ValueError
+        val = float(val_clean)
+        
+        low, high = _parse_range(reference_range)
+
+        if low is not None or high is not None:
+            if low is not None and val < low:
+                return "LOW"
+            if high is not None and val > high:
+                return "HIGH"
+            return "NORMAL"
     except (ValueError, TypeError):
-        return "NORMAL"  # can't compare non-numeric
+        pass
 
-    low, high = _parse_range(reference_range)
+    # Non-numeric fallback
+    if not ref_str:
+        return "NORMAL"
 
-    if low is not None and val < low:
-        return "LOW"
-    if high is not None and val > high:
-        return "HIGH"
+    if val_str == ref_str or val_str in ref_str:
+        return "NORMAL"
 
-    return "NORMAL"
+    normal_words = {"normal", "negative", "nil", "absent", "clear", "non-reactive", "not detected"}
+    if val_str in normal_words:
+        return "NORMAL"
+
+    return "ABNORMAL"
 
 
 def flag_abnormals_node(state: ReportState) -> dict:
@@ -244,7 +266,7 @@ def flag_abnormals_node(state: ReportState) -> dict:
         updated = dict(tv)
         updated["status"] = status
         flagged.append(updated)
-        if status in ("HIGH", "LOW"):
+        if status in ("HIGH", "LOW", "ABNORMAL"):
             abnormals.append(updated)
 
     logger.info(

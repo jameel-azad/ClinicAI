@@ -75,14 +75,14 @@ async def handle_doctor_voice_note(
 
         if patient_number:
             approval_msg = (
-                f"📋 SOAP note ready for *{patient_name or 'patient'}*.\n\n"
+                f"📋 Prescription note ready for *{patient_name or 'patient'}*.\n\n"
                 "Review the PDF and reply:\n"
                 f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
                 f"❌ *REJECT {soap_id}* — discards the note"
             )
         else:
             approval_msg = (
-                "📋 SOAP note generated — patient could not be identified automatically.\n\n"
+                "📋 Prescription note generated — patient could not be identified automatically.\n\n"
                 "Review the PDF and reply:\n"
                 f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
                 f"❌ *REJECT {soap_id}* — discards the note\n\n"
@@ -97,7 +97,7 @@ async def handle_doctor_voice_note(
                 approval_msg + f"\n\n(PDF saved at: {stored_pdf})",
             )
 
-        return "Voice note transcribed. SOAP note sent to you for review — approve it to deliver to the patient."
+        return "Voice note transcribed. Prescription note sent to you for review — approve it to deliver to the patient."
     except Exception as exc:
         return f"Sorry, I could not process the doctor's voice note: {exc}"
     finally:

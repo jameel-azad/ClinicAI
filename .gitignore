@@ -24,3 +24,5 @@ venv/
 # Generated test PDFs or artifacts
 Parser/tests/
 generated/
+
+.claude/

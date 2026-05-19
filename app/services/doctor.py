@@ -1,8 +1,8 @@
 import os
 
-from app.services.appointment_approval import handle_doctor_approval_reply
+from app.services.appointment_approval import handle_appointment_button_reply, handle_doctor_approval_reply
 from app.services.doctor_setup import handle_doctor_setup_message
-from app.services.soap_approval import handle_soap_approval_reply
+from app.services.soap_approval import handle_soap_approval_reply, handle_soap_button_reply
 from app.services.store import all_appointments, get_waiting_approvals_for_doctor
 
 
@@ -10,9 +10,19 @@ def handle_doctor_message(
     message: str,
     doctor_name: str | None = None,
     doctor_number: str | None = None,
+    button_payload: str = "",
 ) -> str:
     text = message.strip().lower()
     name = doctor_name or "Doctor"
+
+    # Button taps come in via ButtonPayload — handle before anything else
+    if button_payload and doctor_number:
+        soap_reply = handle_soap_button_reply(button_payload, doctor_number)
+        if soap_reply:
+            return soap_reply
+        apt_reply = handle_appointment_button_reply(button_payload, doctor_number)
+        if apt_reply:
+            return apt_reply
 
     if doctor_number:
         soap_reply = handle_soap_approval_reply(message, doctor_number)

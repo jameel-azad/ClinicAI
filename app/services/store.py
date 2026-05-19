@@ -181,5 +181,12 @@ def delete_pending_soap(soap_id: str) -> None:
     _pending_soaps.pop(soap_id.upper(), None)
 
 
+def get_latest_soap_for_doctor(doctor_number: str) -> Optional[dict]:
+    matches = [s for s in _pending_soaps.values() if s.get("doctor_number") == doctor_number]
+    if not matches:
+        return None
+    return max(matches, key=lambda s: s.get("created_at", ""))
+
+
 def _profile_key(value: str | None) -> str:
     return "".join(ch for ch in (value or "").lower() if ch.isalnum())

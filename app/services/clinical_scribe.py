@@ -72,30 +72,49 @@ async def handle_doctor_voice_note(
         })
 
         public_url = _public_pdf_url(document_id)
+        soap_content_sid = os.getenv("SOAP_APPROVAL_CONTENT_SID", "").strip()
 
-        if patient_number:
-            approval_msg = (
-                f"📋 SOAP note ready for *{patient_name or 'patient'}*.\n\n"
-                "Review the PDF and reply:\n"
-                f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
-                f"❌ *REJECT {soap_id}* — discards the note"
-            )
-        else:
-            approval_msg = (
-                "📋 SOAP note generated — patient could not be identified automatically.\n\n"
-                "Review the PDF and reply:\n"
-                f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
-                f"❌ *REJECT {soap_id}* — discards the note\n\n"
-                "💡 Include the patient's WhatsApp number after APPROVE."
-            )
+        if soap_content_sid:
+            # ── Button flow ──────────────────────────────────────────────────────
+            # 1. Send the PDF so the doctor can read it
+            if public_url:
+                pdf_caption = f"📋 SOAP note for {patient_name or 'patient'} — review before approving."
+                send_whatsapp_media_sync(doctor_number, pdf_caption, public_url)
 
-        if public_url:
-            send_whatsapp_media_sync(doctor_number, approval_msg, public_url)
-        else:
-            send_whatsapp_message_sync(
+            # 2. Send the approval buttons via Content Template
+            from app.services.whatsapp import send_whatsapp_template_sync
+            send_whatsapp_template_sync(
                 doctor_number,
-                approval_msg + f"\n\n(PDF saved at: {stored_pdf})",
+                soap_content_sid,
+                {
+                    "1": patient_name or "unknown patient",
+                    "2": patient_number or "not identified — include number when approving",
+                },
             )
+        else:
+            # ── Text fallback (no template configured) ───────────────────────────
+            if patient_number:
+                approval_msg = (
+                    f"📋 SOAP note ready for *{patient_name or 'patient'}*.\n\n"
+                    "Review the PDF and reply:\n"
+                    f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
+                    f"❌ *REJECT {soap_id}* — discards the note"
+                )
+            else:
+                approval_msg = (
+                    "📋 SOAP note generated — patient could not be identified automatically.\n\n"
+                    "Review the PDF and reply:\n"
+                    f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
+                    f"❌ *REJECT {soap_id}* — discards the note\n\n"
+                    "💡 Include the patient's WhatsApp number after APPROVE."
+                )
+            if public_url:
+                send_whatsapp_media_sync(doctor_number, approval_msg, public_url)
+            else:
+                send_whatsapp_message_sync(
+                    doctor_number,
+                    approval_msg + f"\n\n(PDF saved at: {stored_pdf})",
+                )
 
         return "Voice note transcribed. SOAP note sent to you for review — approve it to deliver to the patient."
     except Exception as exc:

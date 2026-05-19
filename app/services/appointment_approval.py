@@ -23,7 +23,7 @@ from app.services.store import (
     clear_slot_suggestions,
     update_pending_approval,
 )
-from app.services.whatsapp import send_whatsapp_message_sync
+from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_template_sync
 
 
 def request_doctor_approval(session: BookingSession, patient_number: str) -> tuple[str, str | None]:
@@ -76,16 +76,31 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
     }
     save_pending_approval(approval)
 
-    doctor_message = (
-        f"Appointment request {approval_id}\n\n"
-        f"Patient: {session.patient_name or patient_number}\n"
-        f"Doctor: {session.doctor_name}\n"
-        f"Date: {session.requested_date}\n"
-        f"Time: {session.requested_time}\n"
-        f"Reason: {_format_symptoms(session.symptoms)}\n\n"
-        f"Reply YES {approval_id} to approve, NO {approval_id} to reject."
-    )
-    send_whatsapp_message_sync(doctor_number, doctor_message)
+    apt_content_sid = os.getenv("APPOINTMENT_APPROVAL_CONTENT_SID", "").strip()
+    if apt_content_sid:
+        send_whatsapp_template_sync(
+            doctor_number,
+            apt_content_sid,
+            {
+                "1": approval_id,
+                "2": session.patient_name or patient_number,
+                "3": session.doctor_name,
+                "4": session.requested_date,
+                "5": session.requested_time,
+                "6": _format_symptoms(session.symptoms),
+            },
+        )
+    else:
+        doctor_message = (
+            f"Appointment request {approval_id}\n\n"
+            f"Patient: {session.patient_name or patient_number}\n"
+            f"Doctor: {session.doctor_name}\n"
+            f"Date: {session.requested_date}\n"
+            f"Time: {session.requested_time}\n"
+            f"Reason: {_format_symptoms(session.symptoms)}\n\n"
+            f"Reply YES {approval_id} to approve, NO {approval_id} to reject."
+        )
+        send_whatsapp_message_sync(doctor_number, doctor_message)
 
     return (
         f"Thanks. {availability_reason} I have sent this appointment request "
@@ -148,6 +163,32 @@ def handle_doctor_approval_reply(message: str, doctor_number: str) -> str | None
         return _approve(approval)
 
     return _reject(approval)
+
+
+def handle_appointment_button_reply(button_payload: str, doctor_number: str) -> str | None:
+    """Handle Approve/Reject tapped from a WhatsApp button for appointment approval."""
+    payload = button_payload.strip().lower()
+    if payload not in ("apt_approve", "apt_reject"):
+        return None
+
+    normalized_doctor = normalize_whatsapp_number(doctor_number)
+    waiting = get_waiting_approvals_for_doctor(normalized_doctor)
+
+    if not waiting:
+        return "There are no pending appointment approvals for you right now."
+
+    if len(waiting) > 1:
+        ids = ", ".join(item["approval_id"] for item in waiting)
+        return (
+            f"You have {len(waiting)} pending approvals. "
+            f"Reply YES/NO + the request ID to specify which one:\n{ids}"
+        )
+
+    approval = waiting[0]
+    if approval.get("status") != "waiting_doctor":
+        return f"Request {approval['approval_id']} is already {approval.get('status')}."
+
+    return _approve(approval) if payload == "apt_approve" else _reject(approval)
 
 
 def is_slot_available(

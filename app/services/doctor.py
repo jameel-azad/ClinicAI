@@ -2,12 +2,7 @@ import os
 
 from app.services.appointment_approval import handle_doctor_approval_reply
 from app.services.doctor_setup import handle_doctor_setup_message
-from app.services.store import (
-    all_appointments,
-    get_waiting_approvals_for_doctor,
-    has_been_greeted,
-    mark_as_greeted,
-)
+from app.services.store import all_appointments, get_waiting_approvals_for_doctor
 
 
 def handle_doctor_message(
@@ -17,11 +12,6 @@ def handle_doctor_message(
 ) -> str:
     text = message.strip().lower()
     name = doctor_name or "Doctor"
-
-    # First-contact greeting — shown exactly once per server session
-    if doctor_number and not has_been_greeted(doctor_number):
-        mark_as_greeted(doctor_number)
-        return _doctor_greeting(name)
 
     if doctor_number:
         setup_reply = handle_doctor_setup_message(message, doctor_number, doctor_name)
@@ -33,10 +23,10 @@ def handle_doctor_message(
         if approval_reply:
             return approval_reply
 
-    if not text:
-        return _help_message(name)
+    if not text or text in {"hi", "hello", "start"}:
+        return _doctor_greeting(name)
 
-    if text in {"help", "hi", "hello", "start"}:
+    if text == "help":
         return _help_message(name)
 
     if text in {"today", "show today", "today appointments", "appointments"}:

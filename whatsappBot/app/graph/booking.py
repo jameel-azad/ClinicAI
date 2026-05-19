@@ -13,6 +13,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from app.schemas import BookingSession, AppointmentRecord, BookingState
 
 from app.prompts import BOOKING_ENTITY_PROMPT
+from app.services.appointment_approval import (
+    latest_patient_approval_status,
+    request_doctor_approval,
+    request_suggested_slot_approval,
+)
 from app.services.store import save_appointment
 from app.services.scheduler import schedule_reminder
 
@@ -285,6 +290,33 @@ def flow_node(state: BookingState) -> dict:
             "pipeline_log": ["flow_node: already BOOKED"],
         }
 
+    if booking_state == "WAITING_DOCTOR_APPROVAL":
+        status = latest_patient_approval_status(from_number)
+        if status == "approved":
+            session = BookingSession(**session_dict)
+            session.state = "BOOKED"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "BOOKED",
+                "reply_message": "Your appointment has been approved by the doctor and is now confirmed.",
+                "pipeline_log": ["flow_node: doctor approval already completed"],
+            }
+        if status == "rejected":
+            return {
+                "session": None,
+                "current_booking_state": "GREETING",
+                "reply_message": "The doctor could not approve that slot. Please send another date and time.",
+                "pipeline_log": ["flow_node: doctor rejected pending appointment"],
+            }
+        return {
+            "current_booking_state": "WAITING_DOCTOR_APPROVAL",
+            "reply_message": (
+                "Your appointment request is still waiting for doctor approval. "
+                "I will message you as soon as the doctor replies."
+            ),
+            "pipeline_log": ["flow_node: waiting for doctor approval"],
+        }
+
     # If we're stuck in confirm slot (e.g. they didn't say yes/no)
     if booking_state == "CONFIRM_SLOT":
         session = BookingSession(**session_dict)
@@ -356,6 +388,28 @@ def confirm_node(state: BookingState) -> dict:
     message = state["incoming_message"]
     session_dict = state.get("session", {})
     session = BookingSession(**session_dict)
+
+    if message.strip() in {"1", "2", "3"}:
+        reply, approval_id = request_suggested_slot_approval(session, from_number, message)
+        session.state = "WAITING_DOCTOR_APPROVAL" if approval_id else "CONFIRM_SLOT"
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": session.state,
+            "appointment_id": approval_id,
+            "reply_message": reply,
+            "pipeline_log": [f"confirm_node: selected suggested slot id={approval_id}"],
+        }
+
+    if _is_affirmative(message):
+        reply, approval_id = request_doctor_approval(session, from_number)
+        session.state = "WAITING_DOCTOR_APPROVAL" if approval_id else "CONFIRM_SLOT"
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": session.state,
+            "appointment_id": approval_id,
+            "reply_message": reply,
+            "pipeline_log": [f"confirm_node: sent doctor approval request id={approval_id}"],
+        }
 
     if _is_affirmative(message):
         # ── Confirm the appointment ────────────────────────────────────────────

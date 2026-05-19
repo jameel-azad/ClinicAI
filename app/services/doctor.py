@@ -63,7 +63,7 @@ def _doctor_greeting(name: str) -> str:
     return (
         f"Hello Dr. {name}! 👋\n\n"
         f"Welcome to {clinic}. Here's what you can do:\n\n"
-        "🎙️ *Voice note* → Send an audio recording and I'll generate a SOAP note PDF for your patient\n"
+        "🎙️ *Voice note* → Send an audio recording and I'll generate a prescription & summary PDF for your patient\n"
         "✅ *Appointments* → Approve or suggest an alternate time for pending patient bookings\n\n"
         "How can I help you today?"
     )

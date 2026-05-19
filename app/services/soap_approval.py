@@ -14,7 +14,7 @@ def handle_soap_button_reply(button_payload: str, doctor_number: str) -> str | N
 
     soap = get_latest_soap_for_doctor(doctor_number)
     if not soap:
-        return "No pending SOAP notes found for your number."
+        return "No pending prescriptions found for your number."
 
     soap_id = soap.get("soap_id", "")
     if payload == "soap_approve":
@@ -26,9 +26,9 @@ def handle_soap_approval_reply(message: str, doctor_number: str) -> str | None:
     upper = message.strip().upper()
 
     approve_match = re.match(
-        r"APPROVE\s+(SOAP[A-F0-9]{6})(?:\s+(\+?\d[\d\s\-()+]{7,}\d))?", upper
+        r"APPROVE\s+((?:SOAP|RX)[A-F0-9]{6})(?:\s+(\+?\d[\d\s\-()+]{7,}\d))?", upper
     )
-    reject_match = re.match(r"REJECT\s+(SOAP[A-F0-9]{6})", upper)
+    reject_match = re.match(r"REJECT\s+((?:SOAP|RX)[A-F0-9]{6})", upper)
 
     if approve_match:
         return _approve(approve_match.group(1), approve_match.group(2))
@@ -65,7 +65,7 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
     if public_url:
         sent = send_whatsapp_media_sync(patient_number, body, public_url)
         if sent:
-            return f"✅ SOAP note approved and sent to {patient_number}."
+            return f"✅ Prescription note approved and sent to {patient_number}."
         return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please send manually."
 
     pdf_path = get_scribe_pdf_path(document_id) if document_id else None
@@ -81,7 +81,7 @@ def _reject(soap_id: str) -> str | None:
     if not soap:
         return None
     delete_pending_soap(soap_id)
-    return f"❌ SOAP note {soap_id} rejected and discarded."
+    return f"❌ Prescription note {soap_id} rejected and discarded."
 
 
 def _scribe_pdf_url(document_id: str | None) -> str | None:

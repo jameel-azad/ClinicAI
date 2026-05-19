@@ -61,8 +61,8 @@ async def handle_doctor_voice_note(
         patient_number = _resolve_patient_number(result, doctor_name, caption)
         patient_name = _patient_name(result)
 
-        # Store pending SOAP — doctor must approve before it reaches the patient
-        soap_id = "SOAP" + str(uuid.uuid4())[:6].upper()
+        # Store pending prescription — doctor must approve before it reaches the patient
+        soap_id = "RX" + str(uuid.uuid4())[:6].upper()
         from app.services.store import save_pending_soap
         save_pending_soap(soap_id, {
             "document_id": document_id,
@@ -78,7 +78,7 @@ async def handle_doctor_voice_note(
             # ── Button flow ──────────────────────────────────────────────────────
             # 1. Send the PDF so the doctor can read it
             if public_url:
-                pdf_caption = f"📋 SOAP note for {patient_name or 'patient'} — review before approving."
+                pdf_caption = f"📋 Prescription note for {patient_name or 'patient'} — review before approving."
                 send_whatsapp_media_sync(doctor_number, pdf_caption, public_url)
 
             # 2. Send the approval buttons via Content Template
@@ -95,14 +95,14 @@ async def handle_doctor_voice_note(
             # ── Text fallback (no template configured) ───────────────────────────
             if patient_number:
                 approval_msg = (
-                    f"📋 SOAP note ready for *{patient_name or 'patient'}*.\n\n"
+                    f"📋 Prescription note ready for *{patient_name or 'patient'}*.\n\n"
                     "Review the PDF and reply:\n"
                     f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
                     f"❌ *REJECT {soap_id}* — discards the note"
                 )
             else:
                 approval_msg = (
-                    "📋 SOAP note generated — patient could not be identified automatically.\n\n"
+                    "📋 Prescription note generated — patient could not be identified automatically.\n\n"
                     "Review the PDF and reply:\n"
                     f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
                     f"❌ *REJECT {soap_id}* — discards the note\n\n"

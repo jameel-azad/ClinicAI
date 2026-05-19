@@ -114,10 +114,10 @@ def _section_bg(confidence: float) -> colors.Color:
 
 
 SECTION_LABELS = {
-    "subjective": "S — SUBJECTIVE",
-    "objective": "O — OBJECTIVE",
-    "assessment": "A — ASSESSMENT",
-    "plan": "P — PLAN",
+    "subjective": "Chief Complaints & History",
+    "objective": "Clinical Findings & Vitals",
+    "assessment": "Diagnosis & Assessment",
+    "plan": "Treatment Plan & Prescription",
 }
 
 
@@ -295,7 +295,7 @@ def build_soap_pdf(
             sec = soap_note.get(sec_key, {})
             cq = sec.get("clarifying_question", "")
             story.append(Paragraph(
-                f"• <b>{sec_key.upper()}</b>: {cq or 'No information found in voice note.'}",
+                f"• <b>{SECTION_LABELS.get(sec_key, sec_key).upper()}</b>: {cq or 'No information found in voice note.'}",
                 styles["appendix_body"],
             ))
         story.append(Spacer(1, 4 * mm))

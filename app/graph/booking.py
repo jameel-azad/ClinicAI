@@ -355,10 +355,17 @@ def flow_node(state: BookingState) -> dict:
 
     if missing:
         session.state = "COLLECTING_INFO"
+        # When entering the flow without explicit appointment_book intent (e.g., user said "Yes"
+        # responding to the bot's "Would you like to book?" question), use MSG_GREETING so
+        # we don't echo back the classifier's generic low-confidence response.
+        if booking_state == "GREETING" and state.get("intent") != "appointment_book":
+            reply = MSG_GREETING
+        else:
+            reply = bot_response or MSG_GREETING
         return {
             "session": session.model_dump(),
             "current_booking_state": "COLLECTING_INFO",
-            "reply_message": bot_response or MSG_GREETING,
+            "reply_message": reply,
             "pipeline_log": [f"flow_node: COLLECTING_INFO — missing {missing}"],
         }
     else:
@@ -460,6 +467,11 @@ def route_after_session(
 
     # If patient wants to book OR is mid-flow, go to flow_node
     if intent == "appointment_book" or booking_state not in ("GREETING", "BOOKED"):
+        return "flow_node"
+
+    # Affirmative in GREETING = user is likely responding to the bot's "Would you like to book?" question
+    message = state.get("incoming_message", "")
+    if booking_state == "GREETING" and _is_affirmative(message):
         return "flow_node"
 
     # Everything else (general query, off-topic during flow)

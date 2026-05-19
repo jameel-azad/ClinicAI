@@ -1,3 +1,5 @@
+import os
+
 from app.services.google_calendar import calendar_setup_status
 from app.services.store import (
     clear_doctor_setup_session,
@@ -32,7 +34,7 @@ def handle_doctor_setup_message(
             session["profile"]["name"] = fallback_name
             session["step"] = "google_email"
             save_doctor_setup_session(doctor_number, session)
-            return "Doctor setup started.\n\nWhat Google Calendar email should FellowAI use?"
+            return f"Doctor setup started.\n\nWhat Google Calendar email should {os.getenv('CLINIC_NAME', 'ClinicAI')} use?"
         save_doctor_setup_session(doctor_number, session)
         return "Doctor setup started.\n\nWhat is your doctor name? Example: Dr Pawan"
 
@@ -50,7 +52,7 @@ def handle_doctor_setup_message(
         existing["step"] = "google_email"
         existing["profile"] = profile
         save_doctor_setup_session(doctor_number, existing)
-        return "Got it. What Google Calendar email should FellowAI use?"
+        return f"Got it. What Google Calendar email should {os.getenv('CLINIC_NAME', 'ClinicAI')} use?"
 
     if step == "google_email":
         profile["google_email"] = text

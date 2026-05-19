@@ -20,12 +20,14 @@ from app.services.appointment_approval import (
 
 load_dotenv()
 
+_CLINIC_NAME = os.getenv("CLINIC_NAME", "ClinicAI")
+
 # ── LLM for entity extraction ──────────────────────────────────────────────────
 
 def _groq_llm():
     return ChatGroq(
         api_key=os.getenv("GROQ_API_KEY"),
-        model="llama-3.3-70b-versatile",
+        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
         temperature=0.1,
         max_tokens=150,
     )
@@ -35,7 +37,7 @@ def _groq_llm():
 # All bot messages live here — easy to edit without touching logic.
 
 MSG_GREETING = (
-    "👋 Hello! Welcome to ClinicAI Assistant.\n\n"
+    f"👋 Hello! Welcome to {_CLINIC_NAME} Assistant.\n\n"
     "I can help you book an appointment. What date and time works for you?\n"
 )
 

@@ -1,3 +1,4 @@
+import os
 import re
 import uuid
 
@@ -158,7 +159,8 @@ def is_slot_available(
         try:
             return check_google_availability(date_str, time_str)
         except Exception as exc:
-            return False, f"Google Calendar check failed: {exc}"
+            print(f"[WARN] Google Calendar check failed, falling back to local: {exc}")
+            # Fall through to local calendar check below
 
     for appt in all_appointments().values():
         if (
@@ -292,12 +294,16 @@ def _format_suggestions(suggestions: list[dict]) -> str:
     )
 
 
+_DEFAULT_SLOT_CANDIDATES = ["10:30 AM", "11:00 AM", "11:30 AM", "12:00 PM", "5:00 PM", "5:30 PM"]
+
+
 def _suggest_local_slots(
     doctor_name: str | None,
     date_str: str | None,
     time_str: str | None,
 ) -> list[dict]:
-    candidates = ["10:30 AM", "11:00 AM", "11:30 AM", "12:00 PM", "5:00 PM", "5:30 PM"]
+    env_slots = os.getenv("APPOINTMENT_SLOT_CANDIDATES", "")
+    candidates = [t.strip() for t in env_slots.split(",") if t.strip()] or _DEFAULT_SLOT_CANDIDATES
     suggestions = []
     for candidate in candidates:
         if _same(candidate, time_str):

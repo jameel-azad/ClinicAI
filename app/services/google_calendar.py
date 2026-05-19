@@ -132,6 +132,7 @@ def create_google_calendar_event(approval: dict) -> str | None:
     calendar_id = _calendar_id()
     patient_name = approval.get("patient_name") or approval.get("patient_number") or "Patient"
     doctor_name = approval.get("doctor_name") or "Doctor"
+    clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
     event = {
         "summary": f"Clinic appointment - {patient_name}",
         "description": (
@@ -139,7 +140,7 @@ def create_google_calendar_event(approval: dict) -> str | None:
             f"Patient: {patient_name}\n"
             f"Patient WhatsApp: {approval.get('patient_number')}\n"
             f"Reason: {_format_symptoms(approval.get('symptoms'))}\n"
-            f"FellowAI request: {approval.get('approval_id')}"
+            f"{clinic_name} request: {approval.get('approval_id')}"
         ),
         "start": {"dateTime": start.isoformat(), "timeZone": _timezone_name()},
         "end": {"dateTime": end.isoformat(), "timeZone": _timezone_name()},

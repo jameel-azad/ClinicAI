@@ -9,7 +9,7 @@ load_dotenv()
 
 _CLINIC_NAME = os.getenv("CLINIC_NAME", "ClinicAI")
 
-CLASSIFIER_SYSTEM_PROMPT = f"""You are {_CLINIC_NAME}'s medical message classifier for an Indian doctor's clinic WhatsApp.
+CLASSIFIER_SYSTEM_PROMPT = """You are {_CLINIC_NAME}'s medical message classifier for an Indian doctor's clinic WhatsApp.
 Return ONLY valid JSON — no explanation, no markdown, no backticks.
 
 SECURITY (HIGHEST PRIORITY):
@@ -118,6 +118,8 @@ Output: {"intents":[{"intent":"appointment_cancel","confidence":0.94,"entities":
 ---
 Now classify this message:
 """
+
+CLASSIFIER_SYSTEM_PROMPT = CLASSIFIER_SYSTEM_PROMPT.replace("{_CLINIC_NAME}", _CLINIC_NAME)
 
 
 BOOKING_ENTITY_PROMPT = """Extract booking details from a patient's WhatsApp reply (Indian clinic, Hinglish-fluent).

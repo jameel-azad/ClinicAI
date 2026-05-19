@@ -59,53 +59,45 @@ async def handle_doctor_voice_note(
 
         document_id, stored_pdf = store_scribe_pdf(pdf_path)
         patient_number = _resolve_patient_number(result, doctor_name, caption)
-        if not patient_number:
-            # Patient unidentified — send PDF back to the doctor so it isn't lost
-            fallback_url = _public_pdf_url(document_id)
-            fallback_msg = (
-                "⚠️ SOAP note generated but the patient could not be identified automatically.\n"
-                "Please forward this PDF to the patient.\n\n"
-                "💡 Tip: Include the patient's WhatsApp number in your voice note caption next time "
-                "(e.g. 'Patient: +919876543210')."
-            )
-            if fallback_url:
-                send_whatsapp_media_sync(doctor_number, fallback_msg, fallback_url)
-            else:
-                send_whatsapp_message_sync(
-                    doctor_number,
-                    fallback_msg + f"\n\nPDF saved at: {stored_pdf}",
-                )
-            return (
-                "Voice note transcribed and PDF generated, but the patient could not be identified. "
-                "The PDF has been sent back to you — please forward it to the patient manually."
-            )
+        patient_name = _patient_name(result)
+
+        # Store pending SOAP — doctor must approve before it reaches the patient
+        soap_id = "SOAP" + str(uuid.uuid4())[:6].upper()
+        from app.services.store import save_pending_soap
+        save_pending_soap(soap_id, {
+            "document_id": document_id,
+            "patient_number": patient_number,
+            "patient_name": patient_name,
+            "doctor_number": doctor_number,
+        })
 
         public_url = _public_pdf_url(document_id)
-        patient_name = _patient_name(result)
-        body = (
-            "Doctor's consultation note is attached."
-            if not patient_name
-            else f"Doctor's consultation note for {patient_name} is attached."
-        )
+
+        if patient_number:
+            approval_msg = (
+                f"📋 SOAP note ready for *{patient_name or 'patient'}*.\n\n"
+                "Review the PDF and reply:\n"
+                f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
+                f"❌ *REJECT {soap_id}* — discards the note"
+            )
+        else:
+            approval_msg = (
+                "📋 SOAP note generated — patient could not be identified automatically.\n\n"
+                "Review the PDF and reply:\n"
+                f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
+                f"❌ *REJECT {soap_id}* — discards the note\n\n"
+                "💡 Include the patient's WhatsApp number after APPROVE."
+            )
 
         if public_url:
-            sent = send_whatsapp_media_sync(patient_number, body, public_url)
-            if sent:
-                return f"Voice note transcribed and PDF sent to {patient_number}."
-            return "The PDF was generated, but sending it on WhatsApp failed."
+            send_whatsapp_media_sync(doctor_number, approval_msg, public_url)
+        else:
+            send_whatsapp_message_sync(
+                doctor_number,
+                approval_msg + f"\n\n(PDF saved at: {stored_pdf})",
+            )
 
-        send_whatsapp_message_sync(
-            patient_number,
-            (
-                body
-                + "\n\nThe PDF was generated, but PUBLIC_BASE_URL is not configured, "
-                + "so I cannot attach it through Twilio yet."
-            ),
-        )
-        return (
-            f"Voice note transcribed and PDF generated at {stored_pdf}, but PUBLIC_BASE_URL "
-            "is required to send it as a WhatsApp PDF attachment."
-        )
+        return "Voice note transcribed. SOAP note sent to you for review — approve it to deliver to the patient."
     except Exception as exc:
         return f"Sorry, I could not process the doctor's voice note: {exc}"
     finally:

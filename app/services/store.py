@@ -163,5 +163,23 @@ def clear_slot_suggestions(patient_number: str) -> None:
     _slot_suggestions.pop(patient_number, None)
 
 
+# ── Pending SOAP approvals ─────────────────────────────────────────────────────
+_pending_soaps: dict[str, dict] = {}
+
+
+def save_pending_soap(soap_id: str, data: dict) -> None:
+    data["soap_id"] = soap_id.upper()
+    data["created_at"] = datetime.now().isoformat()
+    _pending_soaps[soap_id.upper()] = data
+
+
+def get_pending_soap(soap_id: str) -> Optional[dict]:
+    return _pending_soaps.get(soap_id.upper())
+
+
+def delete_pending_soap(soap_id: str) -> None:
+    _pending_soaps.pop(soap_id.upper(), None)
+
+
 def _profile_key(value: str | None) -> str:
     return "".join(ch for ch in (value or "").lower() if ch.isalnum())

@@ -2,6 +2,7 @@ import os
 
 from app.services.appointment_approval import handle_doctor_approval_reply
 from app.services.doctor_setup import handle_doctor_setup_message
+from app.services.soap_approval import handle_soap_approval_reply
 from app.services.store import all_appointments, get_waiting_approvals_for_doctor
 
 
@@ -12,6 +13,11 @@ def handle_doctor_message(
 ) -> str:
     text = message.strip().lower()
     name = doctor_name or "Doctor"
+
+    if doctor_number:
+        soap_reply = handle_soap_approval_reply(message, doctor_number)
+        if soap_reply:
+            return soap_reply
 
     if doctor_number:
         setup_reply = handle_doctor_setup_message(message, doctor_number, doctor_name)

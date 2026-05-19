@@ -174,6 +174,13 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
         if errors and not final_state.get("doctor_summary"):
             return "Sorry, I had trouble reading that report. Please ask the clinic to check it manually."
 
+        # Only forward if the patient has an existing booking
+        if not _find_doctor_for_patient(from_number):
+            return (
+                "We couldn't find an active booking for your number. "
+                "Please book an appointment first, then share your lab report."
+            )
+
         # Store PDF permanently before cleanup so we can share the original with the doctor
         document_id, _ = store_lab_pdf(temp_path)
         pdf_url = _lab_pdf_public_url(document_id)
@@ -212,7 +219,7 @@ def _find_doctor_for_patient(from_number: str) -> list[str]:
             if doctor_number:
                 return [doctor_number]
 
-    return all_doctor_numbers()
+    return []
 
 
 def _forward_report_to_doctor(final_state: dict, from_number: str, pdf_url: str | None = None) -> None:

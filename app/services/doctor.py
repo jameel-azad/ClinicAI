@@ -1,6 +1,13 @@
+import os
+
 from app.services.appointment_approval import handle_doctor_approval_reply
 from app.services.doctor_setup import handle_doctor_setup_message
-from app.services.store import all_appointments, get_waiting_approvals_for_doctor
+from app.services.store import (
+    all_appointments,
+    get_waiting_approvals_for_doctor,
+    has_been_greeted,
+    mark_as_greeted,
+)
 
 
 def handle_doctor_message(
@@ -8,14 +15,13 @@ def handle_doctor_message(
     doctor_name: str | None = None,
     doctor_number: str | None = None,
 ) -> str:
-    """
-    First doctor-side interface.
-
-    This is intentionally command-first: doctors talk to FellowAI and receive
-    summaries, not raw patient chats.
-    """
     text = message.strip().lower()
     name = doctor_name or "Doctor"
+
+    # First-contact greeting — shown exactly once per server session
+    if doctor_number and not has_been_greeted(doctor_number):
+        mark_as_greeted(doctor_number)
+        return _doctor_greeting(name)
 
     if doctor_number:
         setup_reply = handle_doctor_setup_message(message, doctor_number, doctor_name)
@@ -46,15 +52,26 @@ def handle_doctor_message(
     )
 
 
-def _help_message(name: str) -> str:
+def _doctor_greeting(name: str) -> str:
+    clinic = os.getenv("CLINIC_NAME", "ClinicAI")
     return (
-        f"Hello {name}. This is your FellowAI doctor interface.\n\n"
-        "Commands you can use now:\n"
+        f"Hello Dr. {name}! 👋\n\n"
+        f"Welcome to {clinic}. Here's what you can do:\n\n"
+        "🎙️ *Voice note* → Send an audio recording and I'll generate a SOAP note PDF for your patient\n"
+        "✅ *Appointments* → Approve or suggest an alternate time for pending patient bookings\n\n"
+        "How can I help you today?"
+    )
+
+
+def _help_message(name: str) -> str:
+    clinic = os.getenv("CLINIC_NAME", "ClinicAI")
+    return (
+        f"Hello {name}. This is your {clinic} doctor interface.\n\n"
+        "Commands you can use:\n"
         "- setup doctor\n"
         "- profile\n"
         "- today\n"
-        "- pending\n"
-        "- inbox\n"
+        "- pending / inbox\n"
         "- help"
     )
 
@@ -78,14 +95,15 @@ def _format_today_appointments() -> str:
 
 
 def _format_pending_approvals(doctor_number: str | None) -> str:
+    clinic = os.getenv("CLINIC_NAME", "ClinicAI")
     if not doctor_number:
-        return "FellowAI Inbox: no doctor number found for this request."
+        return f"{clinic} Inbox: no doctor number found for this request."
 
     approvals = get_waiting_approvals_for_doctor(doctor_number)
     if not approvals:
-        return "FellowAI Inbox: no pending appointment approvals right now."
+        return f"{clinic} Inbox: no pending appointment approvals right now."
 
-    lines = ["FellowAI Inbox - pending approvals:"]
+    lines = [f"{clinic} Inbox - pending approvals:"]
     for index, approval in enumerate(approvals, start=1):
         lines.extend(
             [

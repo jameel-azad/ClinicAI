@@ -37,8 +37,12 @@ def _groq_llm():
 # All bot messages live here — easy to edit without touching logic.
 
 MSG_GREETING = (
-    f"👋 Hello! Welcome to {_CLINIC_NAME} Assistant.\n\n"
-    "I can help you book an appointment. What date and time works for you?\n"
+    f"Namaste! Welcome to {_CLINIC_NAME} 🙏\n\n"
+    "I'm your virtual receptionist. Here's how I can help you:\n\n"
+    "📅 *Book a doctor's appointment*\n"
+    "📋 *Share your lab report* for the doctor to review\n\n"
+    "How may I assist you today?\n"
+    "_(You can reply in Hindi or English)_"
 )
 
 MSG_ASK_DOCTOR = (

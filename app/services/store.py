@@ -96,6 +96,18 @@ def all_pending_approvals() -> dict:
     return _pending_approvals.copy()
 
 
+# ── First-contact greeting tracker ────────────────────────────────────────────
+_greeted_numbers: set[str] = set()
+
+
+def has_been_greeted(number: str) -> bool:
+    return number in _greeted_numbers
+
+
+def mark_as_greeted(number: str) -> None:
+    _greeted_numbers.add(number)
+
+
 # Doctor profiles and setup sessions
 _doctor_profiles: dict[str, dict] = {}
 _doctor_setup_sessions: dict[str, dict] = {}

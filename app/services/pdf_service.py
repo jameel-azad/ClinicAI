@@ -1,6 +1,9 @@
 import logging
 import os
+import shutil
 import tempfile
+import uuid
+from pathlib import Path
 
 import httpx
 import pdfplumber
@@ -16,6 +19,39 @@ except ImportError:
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+LAB_PDF_DIR = Path(os.getenv("LAB_PDF_DIR", "generated/lab_pdfs"))
+_lab_pdf_store: dict[str, str] = {}
+
+
+def store_lab_pdf(pdf_path: str) -> tuple[str, str]:
+    """Copy the lab report PDF to permanent storage and return (document_id, stored_path)."""
+    LAB_PDF_DIR.mkdir(parents=True, exist_ok=True)
+    document_id = str(uuid.uuid4())
+    target = LAB_PDF_DIR / f"{document_id}.pdf"
+    shutil.copyfile(pdf_path, target)
+    _lab_pdf_store[document_id] = str(target)
+    return document_id, str(target)
+
+
+def get_lab_pdf_path(document_id: str) -> str | None:
+    stored = _lab_pdf_store.get(document_id)
+    if stored and os.path.exists(stored):
+        return stored
+    target = LAB_PDF_DIR / f"{document_id}.pdf"
+    return str(target) if target.exists() else None
+
+
+def _lab_pdf_public_url(document_id: str) -> str | None:
+    base_url = (
+        os.getenv("PUBLIC_BASE_URL")
+        or os.getenv("APP_PUBLIC_BASE_URL")
+        or os.getenv("WEBHOOK_PUBLIC_URL")
+        or ""
+    ).strip().rstrip("/")
+    if not base_url:
+        return None
+    return f"{base_url}/lab-report/pdf/{document_id}"
 
 
 async def download_media(media_url: str) -> str:
@@ -114,10 +150,12 @@ def format_report_reply(state: dict) -> str:
     return "\n".join(reply_lines)
 
 
-async def handle_incoming_pdf(media_url: str) -> str:
+async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
     """
-    Main workflow for handling a WhatsApp PDF: download, safety check, parse,
-    format reply, then clean up the temporary file.
+    Handle a WhatsApp PDF from a patient:
+    1. Download + safety check + parse
+    2. Forward the full report summary to the doctor
+    3. Return a brief acknowledgment to the patient
     """
     if not lab_report_pipeline:
         return "Sorry, the report parser is currently offline."
@@ -131,7 +169,24 @@ async def handle_incoming_pdf(media_url: str) -> str:
 
         print(f"[Parser] Invoking pipeline for {temp_path}")
         final_state = lab_report_pipeline.invoke({"pdf_path": temp_path})
-        return format_report_reply(final_state)
+
+        errors = final_state.get("errors", [])
+        if errors and not final_state.get("doctor_summary"):
+            return "Sorry, I had trouble reading that report. Please ask the clinic to check it manually."
+
+        # Store PDF permanently before cleanup so we can share the original with the doctor
+        document_id, _ = store_lab_pdf(temp_path)
+        pdf_url = _lab_pdf_public_url(document_id)
+
+        _forward_report_to_doctor(final_state, from_number, pdf_url)
+
+        criticals = final_state.get("criticals", [])
+        if criticals:
+            return (
+                "Your lab report has been received and forwarded to the doctor. "
+                "⚠️ Some critical values were detected — the doctor will reach out to you shortly."
+            )
+        return "Your lab report has been received and forwarded to the doctor for review."
 
     except Exception as e:
         logger.error(f"Error handling PDF: {e}")
@@ -139,3 +194,76 @@ async def handle_incoming_pdf(media_url: str) -> str:
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def _find_doctor_for_patient(from_number: str) -> list[str]:
+    """Return doctor WhatsApp numbers to notify for this patient.
+    Checks the patient's most recent confirmed appointment first,
+    then falls back to all configured doctor numbers.
+    """
+    from app.services.store import get_appointments_by_number
+    from app.services.identity import find_doctor_number, all_doctor_numbers, normalize_whatsapp_number
+
+    if from_number:
+        appointments = get_appointments_by_number(normalize_whatsapp_number(from_number))
+        if appointments:
+            most_recent = max(appointments, key=lambda a: a.confirmed_at)
+            doctor_number = find_doctor_number(most_recent.doctor_name)
+            if doctor_number:
+                return [doctor_number]
+
+    return all_doctor_numbers()
+
+
+def _forward_report_to_doctor(final_state: dict, from_number: str, pdf_url: str | None = None) -> None:
+    """Send the text summary and (if available) the original PDF to the relevant doctor(s)."""
+    from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_media_sync
+
+    doctor_numbers = _find_doctor_for_patient(from_number)
+    if not doctor_numbers:
+        logger.warning("[Parser] No doctor numbers configured — report not forwarded")
+        return
+
+    patient_info = final_state.get("patient_info", {})
+    patient_name = patient_info.get("name") or "Unknown patient"
+    summary = final_state.get("doctor_summary", "No summary available.")
+
+    lines = [
+        f"📋 *Lab Report — {patient_name}*",
+        f"Submitted by: {from_number}" if from_number else "",
+        "",
+        summary,
+        "",
+    ]
+
+    criticals = [ab for ab in final_state.get("abnormals", []) if ab.get("status") == "CRITICAL"]
+    other_abnormals = [ab for ab in final_state.get("abnormals", []) if ab.get("status") != "CRITICAL"]
+
+    if criticals:
+        lines.append(f"🚨 *Critical ({len(criticals)}):*")
+        for c in criticals:
+            lines.append(
+                f"• {c['parameter']}: {c['value']} {c.get('unit', '')} "
+                f"(ref: {c.get('reference_range')}) — {c.get('critical_reason', 'Critical')}"
+            )
+        lines.append("")
+
+    if other_abnormals:
+        lines.append(f"⚠️ *Other Abnormals ({len(other_abnormals)}):*")
+        for ab in other_abnormals:
+            lines.append(
+                f"• {ab['parameter']}: {ab['value']} {ab.get('unit', '')} "
+                f"(ref: {ab.get('reference_range')}) [{ab['status']}]"
+            )
+
+    message = "\n".join(line for line in lines if line is not None)
+
+    for number in doctor_numbers:
+        send_whatsapp_message_sync(number, message)
+        if pdf_url:
+            send_whatsapp_media_sync(
+                number,
+                f"Original lab report — {patient_name}",
+                pdf_url,
+            )
+        print(f"[Parser] Report forwarded to doctor {number}")

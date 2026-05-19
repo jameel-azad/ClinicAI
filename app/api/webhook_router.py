@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from app.graph.booking import booking_graph
 from app.services.clinical_scribe import get_scribe_pdf_path, handle_doctor_voice_note
+from app.services.pdf_service import get_lab_pdf_path
 from app.services.doctor import handle_doctor_message
 from app.services.identity import all_doctor_numbers, identify_sender
 from app.services.store import (
@@ -75,7 +76,7 @@ async def twilio_webhook(
         print(f"[Webhook] Received PDF: {MediaUrl0}")
         from app.services.pdf_service import handle_incoming_pdf
 
-        reply = await handle_incoming_pdf(MediaUrl0)
+        reply = await handle_incoming_pdf(MediaUrl0, from_number)
     else:
         config = {"configurable": {"thread_id": from_number}}
         state_update = {
@@ -134,6 +135,18 @@ async def debug_pending_approvals():
 async def debug_doctors():
     """Shows saved doctor profiles. For development only."""
     return {"doctor_profiles": all_doctor_profiles()}
+
+
+@router.get("/lab-report/pdf/{document_id}", include_in_schema=False)
+async def download_lab_pdf(document_id: str):
+    pdf_path = get_lab_pdf_path(document_id)
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="Lab report PDF not found")
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename="lab_report.pdf",
+    )
 
 
 @router.get("/scribe/pdf/{document_id}", include_in_schema=False)

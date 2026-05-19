@@ -60,10 +60,24 @@ async def handle_doctor_voice_note(
         document_id, stored_pdf = store_scribe_pdf(pdf_path)
         patient_number = _resolve_patient_number(result, doctor_name, caption)
         if not patient_number:
+            # Patient unidentified — send PDF back to the doctor so it isn't lost
+            fallback_url = _public_pdf_url(document_id)
+            fallback_msg = (
+                "⚠️ SOAP note generated but the patient could not be identified automatically.\n"
+                "Please forward this PDF to the patient.\n\n"
+                "💡 Tip: Include the patient's WhatsApp number in your voice note caption next time "
+                "(e.g. 'Patient: +919876543210')."
+            )
+            if fallback_url:
+                send_whatsapp_media_sync(doctor_number, fallback_msg, fallback_url)
+            else:
+                send_whatsapp_message_sync(
+                    doctor_number,
+                    fallback_msg + f"\n\nPDF saved at: {stored_pdf}",
+                )
             return (
-                "I transcribed the voice note and generated the PDF, but could not identify "
-                "which patient should receive it. Include the patient WhatsApp number in the "
-                "caption, or make sure the patient has a confirmed appointment."
+                "Voice note transcribed and PDF generated, but the patient could not be identified. "
+                "The PDF has been sent back to you — please forward it to the patient manually."
             )
 
         public_url = _public_pdf_url(document_id)

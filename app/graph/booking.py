@@ -491,16 +491,19 @@ def route_after_session(
     if booking_state == "CONFIRM_SLOT":
         return "confirm_node"
 
-    # If patient wants to book OR is mid-flow, go to flow_node
-    if intent == "appointment_book" or booking_state not in ("GREETING", "BOOKED"):
+    # Mid-flow (not GREETING/BOOKED) always continues the booking
+    if booking_state not in ("GREETING", "BOOKED"):
         return "flow_node"
 
-    # Affirmative in GREETING = user is likely responding to the bot's "Would you like to book?" question
-    message = state.get("incoming_message", "")
-    if booking_state == "GREETING" and _is_affirmative(message):
+    # Appointment intent always starts/continues the booking flow
+    if intent == "appointment_book":
         return "flow_node"
 
-    # Everything else (general query, off-topic during flow)
+    # New chat: GREETING state always goes to flow_node so MSG_GREETING is shown
+    if booking_state == "GREETING":
+        return "flow_node"
+
+    # Everything else (e.g. BOOKED state, general query)
     return "off_topic_node"
 
 

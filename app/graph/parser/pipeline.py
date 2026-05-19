@@ -11,8 +11,8 @@ Graph structure (linear pipeline):
 
 from langgraph.graph import StateGraph, START, END
 
-from Parser.app.state import ReportState
-from Parser.app.nodes import (
+from app.graph.parser.state import ReportState
+from app.graph.parser.nodes import (
     extract_text_node,
     extract_all_node,
     flag_abnormals_node,

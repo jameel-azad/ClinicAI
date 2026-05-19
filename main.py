@@ -27,6 +27,7 @@ if classifier_graph is None:
     classifier_graph = _optional_attr("app.graph", "classifier_graph")
 
 webhook_router = _optional_attr("app.api.webhook_router", "router")
+parser_router = _optional_attr("app.api.parser_router", "router")
 booking_graph = _optional_attr("app.graph.booking", "booking_graph")
 scheduler = _optional_attr("app.services.scheduler", "scheduler")
 
@@ -67,7 +68,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ClinicAI - WhatsApp Clinic Assistant",
     description=(
-        "Intent classifier and appointment booking bot.\n"
+        "Intent classifier, appointment booking, and lab report parser.\n"
     ),
     version="2.0.0",
     lifespan=lifespan,  
@@ -87,6 +88,9 @@ app.include_router(classifier_router)
 
 if webhook_router is not None:
     app.include_router(webhook_router)
+
+if parser_router is not None:
+    app.include_router(parser_router)
 
 
 @app.get("/", tags=["Health"])

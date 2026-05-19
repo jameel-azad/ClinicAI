@@ -20,8 +20,8 @@ import pdfplumber
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from Parser.app.state import ReportState, PatientInfo, TestValue
-from Parser.app.prompts import EXTRACT_ALL_SYSTEM, SUMMARY_AND_CRITICALS_SYSTEM
+from app.graph.parser.state import ReportState, PatientInfo, TestValue
+from app.prompts.parser import EXTRACT_ALL_SYSTEM, SUMMARY_AND_CRITICALS_SYSTEM
 
 logger = logging.getLogger(__name__)
 

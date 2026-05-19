@@ -20,13 +20,12 @@ async def webhook_health():
 @router.post("/webhook/twilio")
 async def twilio_webhook(
     request: Request,
-    From: str = Form(...),        # e.g. "whatsapp:+917766862219"
-    Body: str = Form(""),         # The patient's message text
-    NumMedia: str = Form("0"),    # Number of media attachments
+    From: str = Form(...),        
+    Body: str = Form(""),         
+    NumMedia: str = Form("0"),   
     MediaUrl0: str = Form(None),
     MediaContentType0: str = Form(None),
 ):
-    # Normalise the from number — strip "whatsapp:" prefix for internal use
     from_number = From.replace("whatsapp:", "").strip()
     message_text = Body.strip()
 

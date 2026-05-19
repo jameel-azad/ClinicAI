@@ -1,10 +1,9 @@
 """
-app/main.py — FastAPI application for Lab Report Parser.
+app/api/parser_router.py — APIRouter for Lab Report Parser.
 
 Endpoints:
-  POST /parse-report   — Main endpoint: PDF in, structured JSON out
-  GET  /health         — Health check
-  GET  /               — API info
+  POST /parser/parse-report   — Main endpoint: PDF in, structured JSON out
+  GET  /parser/health         — Health check
 """
 
 import logging
@@ -13,15 +12,15 @@ import tempfile
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # Load .env before anything else
 load_dotenv()
 
-from Parser.app.pipeline import lab_report_pipeline
-from Parser.app.state import ReportState
+from app.graph.parser.pipeline import lab_report_pipeline
+from app.graph.parser.state import ReportState
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -33,15 +32,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# FastAPI app
+# APIRouter
 # ---------------------------------------------------------------------------
-app = FastAPI(
-    title="ClinicAI — Medical Report Parser",
-    description=(
-        "Extracts patient demographics, lab values, abnormal flags, and a "
-        "plain-English doctor summary from a medical report PDF. "
-    ),
-)
+router = APIRouter(tags=["Parser"])
 
 
 # ---------------------------------------------------------------------------
@@ -80,20 +73,8 @@ class ParseReportResponse(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/")
-def root():
-    return {
-        "service": "ClinicAI Medical Report Parser",
-        "endpoints": {
-            "POST /parse-report": "Parse a medical report PDF",
-            "GET /health": "Health check",
-            "GET /docs": "API documentation (Swagger UI)"
-        },
-    }
-
-
-@app.get("/health")
-def health():
+@router.get("/parser/health")
+def parser_health():
     api_key_set = bool(os.getenv("GROQ_API_KEY"))
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     return {
@@ -103,7 +84,7 @@ def health():
     }
 
 
-@app.post("/parse-report", response_model=ParseReportResponse)
+@router.post("/parser/parse-report", response_model=ParseReportResponse)
 async def parse_report(
     pdf_file: UploadFile = File(..., description="Lab report PDF file"),
     patient_name: Optional[str] = Form(None, description="Patient name (optional override)"),

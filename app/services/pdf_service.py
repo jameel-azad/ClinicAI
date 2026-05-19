@@ -8,13 +8,11 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 from dotenv import load_dotenv
 
-# Ensure Parser can be imported
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 try:
-    from Parser.app.pipeline import lab_report_pipeline
+    from app.graph.parser.pipeline import lab_report_pipeline
 except ImportError:
     lab_report_pipeline = None
-    print("Warning: Could not import Parser.app.pipeline")
+    print("Warning: Could not import app.graph.parser.pipeline")
 
 load_dotenv()
 logger = logging.getLogger(__name__)

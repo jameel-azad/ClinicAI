@@ -46,9 +46,43 @@ def send_whatsapp_message_sync(to: str, body: str) -> bool:
         return False
 
 
+def send_whatsapp_media_sync(to: str, body: str, media_url: str) -> bool:
+    if not to.startswith("whatsapp:"):
+        to = f"whatsapp:{to}"
+
+    if not ACCOUNT_SID or not AUTH_TOKEN:
+        print("\n[Twilio MOCK MEDIA]")
+        print(f"  To       : {to}")
+        print(f"  Body     : {body}")
+        print(f"  Media URL: {media_url}\n")
+        return True
+
+    try:
+        client = _get_client()
+        message = client.messages.create(
+            from_=FROM_NUMBER,
+            body=body,
+            media_url=[media_url],
+            to=to,
+        )
+        print(f"[Twilio] Sent media SID={message.sid} to {to}")
+        return True
+    except Exception as e:
+        print(f"[Twilio MEDIA ERROR] {e}")
+        return False
+
+
 async def send_whatsapp_message(to: str, body: str) -> bool:
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None, send_whatsapp_message_sync, to, body
+    )
+
+
+async def send_whatsapp_media(to: str, body: str, media_url: str) -> bool:
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, send_whatsapp_media_sync, to, body, media_url
     )

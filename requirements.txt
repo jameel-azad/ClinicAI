@@ -14,6 +14,7 @@ langgraph==0.3.5
 langchain-core==0.3.29
 langchain-groq==0.2.3
 langchain-google-genai==2.0.8
+groq==0.13.1
 
 twilio==9.3.6
 apscheduler==3.10.4

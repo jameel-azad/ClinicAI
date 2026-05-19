@@ -1,7 +1,11 @@
-from fastapi import APIRouter, Form, Request, Response
+import os
+
+from fastapi import APIRouter, Form, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from app.graph.booking import booking_graph
+from app.services.clinical_scribe import get_scribe_pdf_path, handle_doctor_voice_note
 from app.services.doctor import handle_doctor_message
 from app.services.identity import all_doctor_numbers, identify_sender
 from app.services.store import (
@@ -43,7 +47,20 @@ async def twilio_webhook(
 
     reply = ""
 
-    if identity.role == "doctor":
+    if (
+        identity.role == "doctor"
+        and NumMedia != "0"
+        and MediaUrl0
+        and MediaContentType0
+    ):
+        reply = await handle_doctor_voice_note(
+            media_url=MediaUrl0,
+            media_content_type=MediaContentType0,
+            doctor_number=identity.phone_number,
+            doctor_name=identity.display_name,
+            caption=message_text,
+        )
+    elif identity.role == "doctor":
         reply = handle_doctor_message(
             message_text,
             identity.display_name,
@@ -117,3 +134,15 @@ async def debug_pending_approvals():
 async def debug_doctors():
     """Shows saved doctor profiles. For development only."""
     return {"doctor_profiles": all_doctor_profiles()}
+
+
+@router.get("/scribe/pdf/{document_id}", include_in_schema=False)
+async def download_scribe_pdf(document_id: str):
+    pdf_path = get_scribe_pdf_path(document_id)
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="Transcript PDF not found")
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename="clinical_note.pdf",
+    )

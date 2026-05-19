@@ -113,28 +113,49 @@ def _extract_booking_entities(message: str) -> dict:
                 "requested_time": None, "doctor_name": None}
 
 
+def _word_match(message: str, words: set, phrases: set | None = None) -> bool:
+    """Match whole words only (avoids 'ha' matching inside 'khansi').
+    Optionally also checks multi-word phrases with substring match.
+    """
+    msg_words = set(re.findall(r"\b\w+\b", message.lower()))
+    if msg_words & words:
+        return True
+    if phrases:
+        msg_lower = message.lower()
+        return any(p in msg_lower for p in phrases)
+    return False
+
+
 def _is_affirmative(message: str) -> bool:
-    msg = message.lower().strip()
-    yes_words = {"yes", "yeah", "yep", "y", "ok", "okay", "haan", "ha",
-                 "confirm", "confirmed", "theek hai", "bilkul", "sure", "done"}
-    return any(w in msg for w in yes_words)
+    return _word_match(
+        message,
+        words={"yes", "yeah", "yep", "y", "ok", "okay", "haan", "ha",
+               "confirm", "confirmed", "bilkul", "sure", "done"},
+        phrases={"theek hai"},
+    )
 
 
 def _is_negative(message: str) -> bool:
-    msg = message.lower().strip()
-    no_words = {"no", "nope", "n", "nahi", "nahin", "cancel", "stop",
-                "band karo", "mat karo", "nhi"}
-    return any(w in msg for w in no_words)
+    return _word_match(
+        message,
+        words={"no", "nope", "nahi", "nahin", "cancel", "stop", "nhi"},
+        phrases={"band karo", "mat karo"},
+    )
 
 
 def _wants_to_continue(message: str) -> bool:
-    msg = message.lower().strip()
-    return any(w in msg for w in {"continue", "haan", "yes", "ok", "jari rakho"})
+    return _word_match(
+        message,
+        words={"continue", "haan", "yes", "ok"},
+        phrases={"jari rakho"},
+    )
 
 
 def _wants_to_stop(message: str) -> bool:
-    msg = message.lower().strip()
-    return any(w in msg for w in {"stop", "nahi", "cancel", "band", "no"})
+    return _word_match(
+        message,
+        words={"stop", "nahi", "cancel", "band", "no"},
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -370,8 +391,9 @@ def flow_node(state: BookingState) -> dict:
         }
     else:
         session.state = "CONFIRM_SLOT"
-        # Use LLM's dynamic confirmation if available, else fallback
-        reply = bot_response or MSG_CONFIRM.format(
+        # Always use the structured confirmation format — the classifier's bot_response
+        # may be a generic greeting (e.g., when intent was general_query), not a proper confirmation.
+        reply = MSG_CONFIRM.format(
             doctor=session.doctor_name,
             date=session.requested_date,
             time=session.requested_time,

@@ -2,8 +2,24 @@ import os
 import re
 
 from app.services.clinical_scribe import get_scribe_pdf_path
-from app.services.store import delete_pending_soap, get_pending_soap
+from app.services.store import delete_pending_soap, get_latest_soap_for_doctor, get_pending_soap
 from app.services.whatsapp import send_whatsapp_media_sync, send_whatsapp_message_sync
+
+
+def handle_soap_button_reply(button_payload: str, doctor_number: str) -> str | None:
+    """Handle APPROVE/REJECT tapped from a WhatsApp button (ButtonPayload field)."""
+    payload = button_payload.strip().lower()
+    if payload not in ("soap_approve", "soap_reject"):
+        return None
+
+    soap = get_latest_soap_for_doctor(doctor_number)
+    if not soap:
+        return "No pending SOAP notes found for your number."
+
+    soap_id = soap.get("soap_id", "")
+    if payload == "soap_approve":
+        return _approve(soap_id, None)
+    return _reject(soap_id)
 
 
 def handle_soap_approval_reply(message: str, doctor_number: str) -> str | None:

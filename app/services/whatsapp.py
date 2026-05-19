@@ -72,6 +72,34 @@ def send_whatsapp_media_sync(to: str, body: str, media_url: str) -> bool:
         return False
 
 
+def send_whatsapp_template_sync(to: str, content_sid: str, content_variables: dict) -> bool:
+    """Send a Twilio Content Template message (e.g. buttons). Cannot be combined with body/media."""
+    import json
+    if not to.startswith("whatsapp:"):
+        to = f"whatsapp:{to}"
+
+    if not ACCOUNT_SID or not AUTH_TOKEN:
+        print(f"\n[Twilio MOCK TEMPLATE]")
+        print(f"  To        : {to}")
+        print(f"  ContentSid: {content_sid}")
+        print(f"  Variables : {content_variables}\n")
+        return True
+
+    try:
+        client = _get_client()
+        message = client.messages.create(
+            content_sid=content_sid,
+            content_variables=json.dumps(content_variables),
+            from_=FROM_NUMBER,
+            to=to,
+        )
+        print(f"[Twilio] Sent template SID={message.sid} to {to}")
+        return True
+    except Exception as e:
+        print(f"[Twilio TEMPLATE ERROR] {e}")
+        return False
+
+
 async def send_whatsapp_message(to: str, body: str) -> bool:
     import asyncio
     loop = asyncio.get_event_loop()

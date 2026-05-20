@@ -125,6 +125,13 @@ CLASSIFIER_SYSTEM_PROMPT = CLASSIFIER_SYSTEM_PROMPT.replace("{_CLINIC_NAME}", _C
 BOOKING_ENTITY_PROMPT = """Extract booking details from a patient's WhatsApp reply (Indian clinic, Hinglish-fluent).
 Hindi time: "kal"=tomorrow, "parso"=day after, "aaj"=today, "subah"=morning, "dopahar"=afternoon, "shaam"=evening, "raat"=night.
 
+RELATIVE REFERENCES — if a reference appointment date/time is provided in context, resolve these against it:
+"same day" / "usi din" / "same date" / "same din" → use the reference appointment date exactly as-is
+"same time" / "usi time" / "usi waqt" → use the reference appointment time exactly as-is
+"one hour later" / "ek ghante baad" → add 1 hour to reference appointment time
+"earlier" / "pehle" → ask for clarification (set null)
+If NO reference appointment is given, treat these as null.
+
 Return ONLY valid JSON (null if not mentioned):
 {"patient_name": <str|null>, "requested_date": <str|null>, "requested_time": <str|null>, "doctor_name": <str|null>}
 

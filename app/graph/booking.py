@@ -127,15 +127,54 @@ MSG_PENDING_CANCELLED = (
     "it has been cancelled. Feel free to book again anytime. 😊"
 )
 
+MSG_RESCHEDULE_START = (
+    "Sure! Your current appointment:\n\n"
+    "👨‍⚕️ Doctor : *{doctor}*\n"
+    "📅 Date   : *{date}*\n"
+    "🕐 Time   : *{time}*\n\n"
+    "What new date and time would you like?\n"
+    "_(e.g. '26th May at 4 PM')_"
+)
+
+MSG_RESCHEDULE_CONFIRM = (
+    "Got it! Reschedule to:\n\n"
+    "📅 Date : *{new_date}*\n"
+    "🕐 Time : *{new_time}*\n\n"
+    "Reply *yes* to confirm or *no* to keep your current appointment."
+)
+
+MSG_RESCHEDULE_NEED_DATE = (
+    "Got the time! What date would you like?\n"
+    "_(e.g. '26th May')_"
+)
+
+MSG_RESCHEDULE_NEED_TIME = (
+    "Got the date! What time would you prefer?\n"
+    "_(e.g. '4:00 PM')_"
+)
+
+MSG_RESCHEDULE_NEED_BOTH = (
+    "What new date and time would you like?\n"
+    "_(e.g. '26th May at 4 PM')_"
+)
+
+MSG_NO_RESCHEDULE = (
+    "You don't have any active appointment to reschedule. "
+    "Would you like to book one? 😊"
+)
+
 
 # ── Entity extractor ───────────────────────────────────────────────────────────
 
-def _extract_booking_entities(message: str) -> dict:
+def _extract_booking_entities(message: str, context: str = "") -> dict:
     try:
         llm = _groq_llm()
+        prompt = BOOKING_ENTITY_PROMPT
+        if context:
+            prompt = f"REFERENCE APPOINTMENT CONTEXT: {context}\n\n" + prompt
         response = llm.invoke([
             SystemMessage(content="Extract booking details. Return ONLY valid JSON."),
-            HumanMessage(content=BOOKING_ENTITY_PROMPT + f'"{message}"'),
+            HumanMessage(content=prompt + f'"{message}"'),
         ])
         raw = response.content
         cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
@@ -494,6 +533,157 @@ def confirm_node(state: BookingState) -> dict:
         }
 
 
+def reschedule_node(state: BookingState) -> dict:
+    """
+    NODE 3e — Reschedule handler.
+    Three steps:
+    1. Show current appointment, ask for new date/time  → RESCHEDULE_COLLECTING
+    2. Collect new date/time (one or both per message)  → RESCHEDULE_CONFIRM
+    3. Confirm yes/no → cancel old + re-run approval, or keep original
+    """
+    from app.services.scheduler import cancel_reminder
+
+    from_number = state["from_number"]
+    message = state["incoming_message"]
+    session_dict = state.get("session") or {}
+    booking_state = session_dict.get("state", "GREETING")
+
+    # ── Step 2: collecting new date/time ──────────────────────────────────────
+    if booking_state == "RESCHEDULE_COLLECTING":
+        session = BookingSession(**session_dict)
+        appt_context = (
+            f"Current appointment is on {session.requested_date} at {session.requested_time}. "
+            f"'same day'/'usi din'/'same date' means {session.requested_date}. "
+            f"'same time'/'usi time' means {session.requested_time}."
+        )
+        entities = _extract_booking_entities(message, context=appt_context)
+        new_date = entities.get("requested_date") or session.new_requested_date
+        new_time = entities.get("requested_time") or session.new_requested_time
+        session.new_requested_date = new_date
+        session.new_requested_time = new_time
+
+        if not new_date and not new_time:
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": MSG_RESCHEDULE_NEED_BOTH,
+                "pipeline_log": ["reschedule_node: no date/time extracted, re-asked"],
+            }
+        if not new_date:
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": MSG_RESCHEDULE_NEED_DATE,
+                "pipeline_log": ["reschedule_node: got time, need date"],
+            }
+        if not new_time:
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": MSG_RESCHEDULE_NEED_TIME,
+                "pipeline_log": ["reschedule_node: got date, need time"],
+            }
+
+        session.state = "RESCHEDULE_CONFIRM"
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "RESCHEDULE_CONFIRM",
+            "reply_message": MSG_RESCHEDULE_CONFIRM.format(
+                new_date=new_date,
+                new_time=new_time,
+            ),
+            "pipeline_log": ["reschedule_node: got both, asking confirmation"],
+        }
+
+    # ── Step 3: patient confirming or declining ────────────────────────────────
+    if booking_state == "RESCHEDULE_CONFIRM":
+        session = BookingSession(**session_dict)
+
+        if _is_affirmative(message):
+            appt = get_latest_appointment_for_patient(from_number)
+            if appt:
+                cancel_appointment(appt.appointment_id)
+                cancel_reminder(appt.appointment_id)
+
+            session.requested_date = session.new_requested_date
+            session.requested_time = session.new_requested_time
+            session.new_requested_date = None
+            session.new_requested_time = None
+
+            reply, approval_id = request_doctor_approval(session, from_number)
+            session.state = "WAITING_DOCTOR_APPROVAL" if approval_id else "CONFIRM_SLOT"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": session.state,
+                "appointment_id": approval_id,
+                "reply_message": reply,
+                "pipeline_log": [f"reschedule_node: old cancelled, new approval sent id={approval_id}"],
+            }
+
+        if _is_negative(message):
+            session.state = "BOOKED"
+            session.new_requested_date = None
+            session.new_requested_time = None
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "BOOKED",
+                "reply_message": "No problem! Your original appointment is kept. 😊",
+                "pipeline_log": ["reschedule_node: patient declined reschedule"],
+            }
+
+        return {
+            "current_booking_state": "RESCHEDULE_CONFIRM",
+            "reply_message": (
+                f"Please reply *yes* to reschedule to *{session.new_requested_date}* at "
+                f"*{session.new_requested_time}*, or *no* to keep your current appointment."
+            ),
+            "pipeline_log": ["reschedule_node: unclear response, re-asked"],
+        }
+
+    # ── Step 1: patient just asked to reschedule ───────────────────────────────
+
+    # Handle stale WAITING_DOCTOR_APPROVAL — check if approval is already done
+    if booking_state == "WAITING_DOCTOR_APPROVAL":
+        appt = get_latest_appointment_for_patient(from_number)
+        if not appt:
+            return {
+                "reply_message": MSG_NO_RESCHEDULE,
+                "pipeline_log": ["reschedule_node: no confirmed appointment in WAITING state"],
+            }
+        session = BookingSession(**session_dict)
+        session.state = "RESCHEDULE_COLLECTING"
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "RESCHEDULE_COLLECTING",
+            "reply_message": MSG_RESCHEDULE_START.format(
+                doctor=appt.doctor_name,
+                date=appt.date_str,
+                time=appt.time_str,
+            ),
+            "pipeline_log": ["reschedule_node: started from WAITING state"],
+        }
+
+    appt = get_latest_appointment_for_patient(from_number)
+    if not appt:
+        return {
+            "reply_message": MSG_NO_RESCHEDULE,
+            "pipeline_log": ["reschedule_node: no appointment to reschedule"],
+        }
+
+    session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+    session.state = "RESCHEDULE_COLLECTING"
+    return {
+        "session": session.model_dump(),
+        "current_booking_state": "RESCHEDULE_COLLECTING",
+        "reply_message": MSG_RESCHEDULE_START.format(
+            doctor=appt.doctor_name,
+            date=appt.date_str,
+            time=appt.time_str,
+        ),
+        "pipeline_log": ["reschedule_node: asked for new date/time"],
+    }
+
+
 def cancel_node(state: BookingState) -> dict:
     """
     NODE 3d — Cancellation handler.
@@ -631,42 +821,36 @@ def cancel_node(state: BookingState) -> dict:
 
 def route_after_session(
     state: BookingState,
-) -> Literal["emergency_node", "flow_node", "off_topic_node", "confirm_node", "cancel_node"]:
-    """
-    The central routing decision of the booking graph.
-    Decides which node handles this message based on:
-    1. Is it an emergency? → emergency_node
-    2. Are we mid-cancellation (CANCEL_CONFIRM state)? → cancel_node
-    3. Is it an appointment_cancel intent? → cancel_node
-    4. Is it a CONFIRM_SLOT state? → confirm_node
-    5. Is it appointment_book intent or mid-flow? → flow_node
-    6. Anything else → off_topic_node
-    """
+) -> Literal["emergency_node", "flow_node", "off_topic_node", "confirm_node", "cancel_node", "reschedule_node"]:
     intent = state.get("intent", "general_query")
     booking_state = state.get("current_booking_state", "GREETING")
 
     if intent == "emergency":
         return "emergency_node"
 
-    # Waiting for cancel yes/no — always goes to cancel_node
+    # Mid-reschedule states always continue in reschedule_node
+    if booking_state in ("RESCHEDULE_COLLECTING", "RESCHEDULE_CONFIRM"):
+        return "reschedule_node"
+
+    # Mid-cancellation always continues in cancel_node
     if booking_state == "CANCEL_CONFIRM":
         return "cancel_node"
 
-    # Patient explicitly asked to cancel
+    if intent == "appointment_reschedule":
+        return "reschedule_node"
+
     if intent == "appointment_cancel":
         return "cancel_node"
 
     if booking_state == "CONFIRM_SLOT":
         return "confirm_node"
 
-    # Mid-flow (not GREETING/BOOKED) always continues the booking
     if booking_state not in ("GREETING", "BOOKED"):
         return "flow_node"
 
     if intent == "appointment_book":
         return "flow_node"
 
-    # New chat: GREETING state always goes to flow_node so MSG_GREETING is shown
     if booking_state == "GREETING":
         return "flow_node"
 
@@ -687,6 +871,7 @@ def build_booking_graph():
     g.add_node("flow_node", flow_node)
     g.add_node("confirm_node", confirm_node)
     g.add_node("cancel_node", cancel_node)
+    g.add_node("reschedule_node", reschedule_node)
 
     g.add_edge(START, "intent_node")
     g.add_edge("intent_node", "session_node")
@@ -699,6 +884,7 @@ def build_booking_graph():
             "off_topic_node": "off_topic_node",
             "confirm_node": "confirm_node",
             "cancel_node": "cancel_node",
+            "reschedule_node": "reschedule_node",
         },
     )
 
@@ -707,6 +893,7 @@ def build_booking_graph():
     g.add_edge("flow_node", END)
     g.add_edge("confirm_node", END)
     g.add_edge("cancel_node", END)
+    g.add_edge("reschedule_node", END)
 
 
     memory = MemorySaver()

@@ -111,6 +111,8 @@ BOOKING_FLOW_STATES = [
     "CONFIRM_SLOT",
     "BOOKED",
     "CANCEL_CONFIRM",
+    "RESCHEDULE_COLLECTING",
+    "RESCHEDULE_CONFIRM",
 ]
 
 
@@ -123,6 +125,8 @@ class BookingSession(BaseModel):
     requested_time: Optional[str] = None
     doctor_name: Optional[str] = None
     symptoms: Optional[list[str]] = None
+    new_requested_date: Optional[str] = None   # used during RESCHEDULE_COLLECTING
+    new_requested_time: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

@@ -52,9 +52,13 @@ async def handle_doctor_voice_note(
             patient_hint=_patient_hint_from_caption(caption),
         )
 
+        pipeline_errors = result.get("errors", [])
+        for err in pipeline_errors:
+            print(f"[scribe_pipeline_error] {err}")
+
         pdf_path = result.get("pdf_path", "")
         if not pdf_path or not os.path.exists(pdf_path):
-            warnings = "; ".join(result.get("errors", []))
+            warnings = "; ".join(pipeline_errors)
             return f"I transcribed the voice note, but could not generate the PDF. {warnings}".strip()
 
         document_id, stored_pdf = store_scribe_pdf(pdf_path)

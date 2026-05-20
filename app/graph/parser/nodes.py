@@ -186,7 +186,8 @@ def _parse_range(reference_range: str) -> tuple[float | None, float | None]:
     if not reference_range:
         return None, None
 
-    ref = reference_range.strip()
+    # Strip thousand-separator commas (Indian: 1,50,000 / Western: 150,000)
+    ref = reference_range.strip().replace(",", "")
 
     # Pattern: low-high (e.g. 13.0-17.0)
     m = re.match(r"^([\d.]+)\s*[-–]\s*([\d.]+)$", ref)

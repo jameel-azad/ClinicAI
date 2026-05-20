@@ -12,14 +12,18 @@ import logging
 import os
 import re
 import tempfile
+import time
 from typing import Any
 
+from dotenv import load_dotenv
 from groq import Groq
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from app.graph.scribe.state import ScribeState, GroundingEntry
 
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -35,12 +39,31 @@ def _llm() -> ChatGroq:
     return ChatGroq(
         model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
         temperature=0,
+        groq_api_key=os.getenv("GROQ_API_KEY"),
     )
 
 
-def _parse_json(text: str) -> Any:
+def _parse_json(raw: Any) -> Any:
+    # Normalise: langchain may return a list of content blocks instead of a string
+    if isinstance(raw, list):
+        raw = " ".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in raw
+        )
+    text = str(raw)
+
+    # Strip markdown code fences
     text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
-    return json.loads(text)
+
+    # Try direct parse first (clean JSON)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # LLM added preamble/postamble — extract JSON object or array from within
+        match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -176,15 +199,12 @@ Expected output:
 
 
 def soap_generator_node(state: ScribeState) -> dict:
-    """
-    Generate a structured SOAP note from the transcript using an LLM.
-    Uses a detailed system prompt with few-shot examples and strict anti-hallucination rules.
-    """
     transcript = state.get("transcript", "")
     errors = list(state.get("errors", []))
 
     if not transcript:
         msg = "No transcript available for SOAP generation."
+        print(f"[soap_gen] {msg}")
         errors.append(msg)
         return {
             "soap_note": _empty_soap(),
@@ -192,34 +212,46 @@ def soap_generator_node(state: ScribeState) -> dict:
             "errors": errors,
         }
 
-    try:
-        llm = _llm()
-        messages = [
-            SystemMessage(content=SOAP_SYSTEM),
-            HumanMessage(content=f"Doctor's voice note transcript:\n\n{transcript}"),
-        ]
-        response = llm.invoke(messages)
-        soap_raw = _parse_json(response.content)
+    last_error = None
+    for attempt in range(2):
+        try:
+            if attempt > 0:
+                print(f"[soap_gen] Retry attempt {attempt + 1} after delay...")
+                time.sleep(3)
 
-        # Identify missing sections
-        missing = []
-        for section in ["subjective", "objective", "assessment", "plan"]:
-            sec = soap_raw.get(section, {})
-            if sec.get("is_missing") or sec.get("confidence", 1.0) < 0.5:
-                missing.append(section)
+            llm = _llm()
+            messages = [
+                SystemMessage(content=SOAP_SYSTEM),
+                HumanMessage(content=f"Doctor's voice note transcript:\n\n{transcript}"),
+            ]
+            response = llm.invoke(messages)
+            print(f"[soap_gen] LLM response received, length={len(str(response.content))}")
 
-        logger.info(f"[soap_gen] Missing sections: {missing}")
-        return {"soap_note": soap_raw, "missing_sections": missing, "errors": errors}
+            soap_raw = _parse_json(response.content)
 
-    except Exception as e:
-        msg = f"SOAP generation failed: {e}"
-        logger.error(f"[soap_gen] {msg}")
-        errors.append(msg)
-        return {
-            "soap_note": _empty_soap(),
-            "missing_sections": ["subjective", "objective", "assessment", "plan"],
-            "errors": errors,
-        }
+            missing = []
+            for section in ["subjective", "objective", "assessment", "plan"]:
+                sec = soap_raw.get(section, {})
+                if sec.get("is_missing") or sec.get("confidence", 1.0) < 0.5:
+                    missing.append(section)
+
+            print(f"[soap_gen] Success — missing={missing}")
+            logger.info(f"[soap_gen] Success — missing sections: {missing}")
+            return {"soap_note": soap_raw, "missing_sections": missing, "errors": errors}
+
+        except Exception as e:
+            last_error = e
+            print(f"[soap_gen] Attempt {attempt + 1} FAILED — {type(e).__name__}: {e}")
+            logger.error(f"[soap_gen] Attempt {attempt + 1} failed: {e}")
+
+    msg = f"SOAP generation failed after retries: {last_error}"
+    print(f"[soap_gen] FINAL FAILURE: {msg}")
+    errors.append(msg)
+    return {
+        "soap_note": _empty_soap(),
+        "missing_sections": ["subjective", "objective", "assessment", "plan"],
+        "errors": errors,
+    }
 
 
 def _empty_soap() -> dict:
@@ -318,7 +350,8 @@ def grounding_check_node(state: ScribeState) -> dict:
         }
 
     except Exception as e:
-        msg = f"Grounding check failed: {e}"
+        msg = f"Grounding check failed: {type(e).__name__}: {e}"
+        print(f"[grounding] {msg}")
         logger.error(f"[grounding] {msg}")
         errors.append(msg)
         return {"grounding_report": [], "ungrounded_flags": [], "errors": errors}

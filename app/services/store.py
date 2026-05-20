@@ -204,3 +204,28 @@ def get_latest_soap_for_doctor(doctor_number: str) -> Optional[dict]:
 
 def _profile_key(value: str | None) -> str:
     return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+# ── Pending lab report reviews ─────────────────────────────────────────────────
+_pending_lab_reviews: dict[str, dict] = {}
+
+
+def save_pending_lab_review(lab_id: str, data: dict) -> None:
+    data["lab_id"] = lab_id.upper()
+    data["created_at"] = datetime.now().isoformat()
+    _pending_lab_reviews[lab_id.upper()] = data
+
+
+def get_pending_lab_review(lab_id: str) -> Optional[dict]:
+    return _pending_lab_reviews.get(lab_id.upper())
+
+
+def delete_pending_lab_review(lab_id: str) -> None:
+    _pending_lab_reviews.pop(lab_id.upper(), None)
+
+
+def get_latest_lab_review_for_doctor(doctor_number: str) -> Optional[dict]:
+    matches = [r for r in _pending_lab_reviews.values() if r.get("doctor_number") == doctor_number]
+    if not matches:
+        return None
+    return max(matches, key=lambda r: r.get("created_at", ""))

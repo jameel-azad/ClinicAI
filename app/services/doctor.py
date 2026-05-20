@@ -1,9 +1,15 @@
 import os
+import re
 
 from app.services.appointment_approval import handle_appointment_button_reply, handle_doctor_approval_reply
 from app.services.doctor_setup import handle_doctor_setup_message
 from app.services.soap_approval import handle_soap_approval_reply, handle_soap_button_reply
-from app.services.store import all_appointments, get_waiting_approvals_for_doctor
+from app.services.store import (
+    all_appointments,
+    delete_pending_lab_review,
+    get_pending_lab_review,
+    get_waiting_approvals_for_doctor,
+)
 
 
 def handle_doctor_message(
@@ -33,6 +39,11 @@ def handle_doctor_message(
         setup_reply = handle_doctor_setup_message(message, doctor_number, doctor_name)
         if setup_reply:
             return setup_reply
+
+    if doctor_number:
+        lab_reply = _handle_lab_review_ack(message, doctor_number, name)
+        if lab_reply:
+            return lab_reply
 
     if doctor_number:
         approval_reply = handle_doctor_approval_reply(message, doctor_number)
@@ -98,6 +109,34 @@ def _format_today_appointments() -> str:
         lines.append(f"{index}. {patient} with {doctor} - {date} at {time}{reason}")
 
     return "\n".join(lines)
+
+
+def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str) -> str | None:
+    """Handle doctor saying 'OK LAB123' — notifies the patient."""
+    from app.services.whatsapp import send_whatsapp_message_sync
+
+    match = re.search(r"\bOK\s+(LAB[A-Z0-9]{6})\b", message.strip().upper())
+    if not match:
+        return None
+
+    lab_id = match.group(1)
+    review = get_pending_lab_review(lab_id)
+    if not review:
+        return f"Lab review *{lab_id}* not found or already acknowledged."
+
+    patient_number = review.get("patient_number", "")
+    patient_name = review.get("patient_name") or "patient"
+
+    if patient_number:
+        send_whatsapp_message_sync(
+            patient_number,
+            f"✅ Dr. {doctor_name} has reviewed your lab report and acknowledged it. "
+            "If you have any concerns, feel free to reach out.",
+        )
+
+    delete_pending_lab_review(lab_id)
+    print(f"[lab_ack] {lab_id} acknowledged by {doctor_number}, patient {patient_number} notified")
+    return f"✅ Acknowledged. {patient_name.capitalize()} has been notified."
 
 
 def _format_pending_approvals(doctor_number: str | None) -> str:

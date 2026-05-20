@@ -185,7 +185,18 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
         document_id, _ = store_lab_pdf(temp_path)
         pdf_url = _lab_pdf_public_url(document_id)
 
-        _forward_report_to_doctor(final_state, from_number, pdf_url)
+        lab_id = "LAB" + str(uuid.uuid4())[:6].upper()
+        doctor_numbers = _find_doctor_for_patient(from_number)
+        _forward_report_to_doctor(final_state, from_number, pdf_url, lab_id=lab_id)
+
+        if doctor_numbers:
+            from app.services.store import save_pending_lab_review
+            patient_info = final_state.get("patient_info", {})
+            save_pending_lab_review(lab_id, {
+                "patient_number": from_number,
+                "patient_name": patient_info.get("name") or "",
+                "doctor_number": doctor_numbers[0],
+            })
 
         criticals = final_state.get("criticals", [])
         if criticals:
@@ -222,7 +233,12 @@ def _find_doctor_for_patient(from_number: str) -> list[str]:
     return []
 
 
-def _forward_report_to_doctor(final_state: dict, from_number: str, pdf_url: str | None = None) -> None:
+def _forward_report_to_doctor(
+    final_state: dict,
+    from_number: str,
+    pdf_url: str | None = None,
+    lab_id: str | None = None,
+) -> None:
     """Send the text summary and (if available) the original PDF to the relevant doctor(s)."""
     from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_media_sync
 
@@ -262,6 +278,10 @@ def _forward_report_to_doctor(final_state: dict, from_number: str, pdf_url: str 
                 f"• {ab['parameter']}: {ab['value']} {ab.get('unit', '')} "
                 f"(ref: {ab.get('reference_range')}) [{ab['status']}]"
             )
+
+    if lab_id:
+        lines.append("")
+        lines.append(f"Reply *OK {lab_id}* to acknowledge — patient will be notified.")
 
     message = "\n".join(line for line in lines if line is not None)
 

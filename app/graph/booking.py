@@ -17,6 +17,12 @@ from app.services.appointment_approval import (
     request_doctor_approval,
     request_suggested_slot_approval,
 )
+from app.services.store import (
+    cancel_appointment,
+    get_latest_appointment_for_patient,
+    get_latest_approval_for_patient,
+    update_pending_approval,
+)
 
 load_dotenv()
 
@@ -96,6 +102,29 @@ MSG_OFF_TOPIC = (
 MSG_ALREADY_BOOKED = (
     "You already have an active booking in progress. "
     "Reply *continue* to resume or *stop* to start over."
+)
+
+MSG_CANCEL_CONFIRM = (
+    "Are you sure you want to cancel your appointment?\n\n"
+    "👨‍⚕️ Doctor : *{doctor}*\n"
+    "📅 Date   : *{date}*\n"
+    "🕐 Time   : *{time}*\n\n"
+    "Reply *yes* to cancel or *no* to keep it."
+)
+
+MSG_CANCEL_CONFIRMED = (
+    "✅ Your appointment with *{doctor}* on *{date}* at *{time}* has been cancelled.\n\n"
+    "Feel free to book a new appointment anytime. 😊"
+)
+
+MSG_NO_APPOINTMENT = (
+    "You don't have any active appointment to cancel. "
+    "Would you like to book one? 😊"
+)
+
+MSG_PENDING_CANCELLED = (
+    "Your appointment request is still waiting for doctor approval — "
+    "it has been cancelled. Feel free to book again anytime. 😊"
 )
 
 
@@ -465,29 +494,168 @@ def confirm_node(state: BookingState) -> dict:
         }
 
 
+def cancel_node(state: BookingState) -> dict:
+    """
+    NODE 3d — Cancellation handler.
+    Handles cancellation of confirmed appointments and pending approvals.
+    Two-step: first ask for confirmation, then execute on yes.
+    """
+    from app.services.identity import find_doctor_number
+    from app.services.whatsapp import send_whatsapp_message_sync
+    from app.services.scheduler import cancel_reminder
+
+    from_number = state["from_number"]
+    message = state["incoming_message"]
+    session_dict = state.get("session") or {}
+    booking_state = session_dict.get("state", "GREETING")
+
+    # ── Step 2: patient is confirming/declining the cancellation ──────────────
+    if booking_state == "CANCEL_CONFIRM":
+        if _is_affirmative(message):
+            appt = get_latest_appointment_for_patient(from_number)
+            if appt:
+                cancel_appointment(appt.appointment_id)
+                cancel_reminder(appt.appointment_id)
+                doctor_number = find_doctor_number(appt.doctor_name)
+                if doctor_number:
+                    send_whatsapp_message_sync(
+                        doctor_number,
+                        f"Patient {appt.patient_name or from_number} has cancelled their "
+                        f"appointment on {appt.date_str} at {appt.time_str}.",
+                    )
+                return {
+                    "session": None,
+                    "current_booking_state": "GREETING",
+                    "reply_message": MSG_CANCEL_CONFIRMED.format(
+                        doctor=appt.doctor_name,
+                        date=appt.date_str,
+                        time=appt.time_str,
+                    ),
+                    "pipeline_log": [f"cancel_node: appointment {appt.appointment_id} cancelled"],
+                }
+            # Appointment disappeared between steps — clear and move on
+            return {
+                "session": None,
+                "current_booking_state": "GREETING",
+                "reply_message": "Your appointment has been cancelled. 😊",
+                "pipeline_log": ["cancel_node: appointment not found on confirm step"],
+            }
+
+        if _is_negative(message):
+            session = BookingSession(**session_dict)
+            session.state = "BOOKED"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "BOOKED",
+                "reply_message": "No problem! Your appointment is kept. 😊",
+                "pipeline_log": ["cancel_node: patient chose not to cancel"],
+            }
+
+        return {
+            "current_booking_state": "CANCEL_CONFIRM",
+            "reply_message": "Please reply *yes* to cancel or *no* to keep your appointment.",
+            "pipeline_log": ["cancel_node: unclear response, re-asked"],
+        }
+
+    # ── Step 1: patient just requested cancellation ────────────────────────────
+
+    # Mid-booking (not yet confirmed) — just drop the in-progress session
+    if booking_state in ("COLLECTING_INFO", "CONFIRM_SLOT"):
+        return {
+            "session": None,
+            "current_booking_state": "GREETING",
+            "reply_message": MSG_CANCELLED,
+            "pipeline_log": ["cancel_node: cancelled in-progress booking"],
+        }
+
+    # Waiting for doctor approval — but first check if doctor already approved
+    if booking_state == "WAITING_DOCTOR_APPROVAL":
+        appt = get_latest_appointment_for_patient(from_number)
+        if appt:
+            # Doctor already approved — session state just wasn't updated yet
+            session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+            session.state = "CANCEL_CONFIRM"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "CANCEL_CONFIRM",
+                "reply_message": MSG_CANCEL_CONFIRM.format(
+                    doctor=appt.doctor_name,
+                    date=appt.date_str,
+                    time=appt.time_str,
+                ),
+                "pipeline_log": ["cancel_node: approval already done, asked for cancel confirmation"],
+            }
+        # Still genuinely waiting — cancel the pending request
+        approval = get_latest_approval_for_patient(from_number)
+        if approval and approval.get("status") == "waiting_doctor":
+            update_pending_approval(approval["approval_id"], status="rejected")
+            doctor_number = find_doctor_number(approval.get("doctor_name"))
+            if doctor_number:
+                send_whatsapp_message_sync(
+                    doctor_number,
+                    f"Patient {approval.get('patient_name') or from_number} has cancelled "
+                    f"their appointment request {approval['approval_id']}.",
+                )
+        return {
+            "session": None,
+            "current_booking_state": "GREETING",
+            "reply_message": MSG_PENDING_CANCELLED,
+            "pipeline_log": ["cancel_node: pending approval cancelled"],
+        }
+
+    # Confirmed appointment — ask for confirmation first
+    appt = get_latest_appointment_for_patient(from_number)
+    if not appt:
+        return {
+            "reply_message": MSG_NO_APPOINTMENT,
+            "pipeline_log": ["cancel_node: no appointment found"],
+        }
+
+    session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+    session.state = "CANCEL_CONFIRM"
+    return {
+        "session": session.model_dump(),
+        "current_booking_state": "CANCEL_CONFIRM",
+        "reply_message": MSG_CANCEL_CONFIRM.format(
+            doctor=appt.doctor_name,
+            date=appt.date_str,
+            time=appt.time_str,
+        ),
+        "pipeline_log": ["cancel_node: asked for cancel confirmation"],
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ROUTING FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def route_after_session(
     state: BookingState,
-) -> Literal["emergency_node", "flow_node", "off_topic_node", "confirm_node"]:
+) -> Literal["emergency_node", "flow_node", "off_topic_node", "confirm_node", "cancel_node"]:
     """
     The central routing decision of the booking graph.
     Decides which node handles this message based on:
     1. Is it an emergency? → emergency_node
-    2. Is it a CONFIRM_SLOT state + patient replying to confirmation? → confirm_node
-    3. Is it appointment_book intent? → flow_node
-    4. Anything else mid-flow? → off_topic_node
+    2. Are we mid-cancellation (CANCEL_CONFIRM state)? → cancel_node
+    3. Is it an appointment_cancel intent? → cancel_node
+    4. Is it a CONFIRM_SLOT state? → confirm_node
+    5. Is it appointment_book intent or mid-flow? → flow_node
+    6. Anything else → off_topic_node
     """
     intent = state.get("intent", "general_query")
     booking_state = state.get("current_booking_state", "GREETING")
 
-    # Always handle emergencies immediately
     if intent == "emergency":
         return "emergency_node"
 
-    # If we're waiting for confirmation, send to confirm_node
+    # Waiting for cancel yes/no — always goes to cancel_node
+    if booking_state == "CANCEL_CONFIRM":
+        return "cancel_node"
+
+    # Patient explicitly asked to cancel
+    if intent == "appointment_cancel":
+        return "cancel_node"
+
     if booking_state == "CONFIRM_SLOT":
         return "confirm_node"
 
@@ -495,7 +663,6 @@ def route_after_session(
     if booking_state not in ("GREETING", "BOOKED"):
         return "flow_node"
 
-    # Appointment intent always starts/continues the booking flow
     if intent == "appointment_book":
         return "flow_node"
 
@@ -503,7 +670,6 @@ def route_after_session(
     if booking_state == "GREETING":
         return "flow_node"
 
-    # Everything else (e.g. BOOKED state, general query)
     return "off_topic_node"
 
 
@@ -520,6 +686,7 @@ def build_booking_graph():
     g.add_node("off_topic_node", off_topic_node)
     g.add_node("flow_node", flow_node)
     g.add_node("confirm_node", confirm_node)
+    g.add_node("cancel_node", cancel_node)
 
     g.add_edge(START, "intent_node")
     g.add_edge("intent_node", "session_node")
@@ -531,6 +698,7 @@ def build_booking_graph():
             "flow_node": "flow_node",
             "off_topic_node": "off_topic_node",
             "confirm_node": "confirm_node",
+            "cancel_node": "cancel_node",
         },
     )
 
@@ -538,6 +706,7 @@ def build_booking_graph():
     g.add_edge("off_topic_node", END)
     g.add_edge("flow_node", END)
     g.add_edge("confirm_node", END)
+    g.add_edge("cancel_node", END)
 
 
     memory = MemorySaver()

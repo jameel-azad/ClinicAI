@@ -98,6 +98,15 @@ def _send_reminder_job(to: str, appointment_id: str, doctor: str, date_str: str,
         print(f"[Reminder] FAILED for appointment {appointment_id}")
 
 
+def cancel_reminder(appointment_id: str) -> None:
+    job_id = f"reminder_{appointment_id}"
+    try:
+        scheduler.remove_job(job_id)
+        print(f"[Reminder] Cancelled job {job_id}")
+    except Exception:
+        pass
+
+
 def schedule_reminder(
     to: str,
     appointment_id: str,
@@ -113,15 +122,8 @@ def schedule_reminder(
         )
         return datetime.now()
 
-    fire_at = appointment_dt - timedelta(minutes=REMINDER_MINUTES)
     now = datetime.now(appointment_dt.tzinfo)
-
-    if fire_at <= now:
-        print(
-            f"[Reminder] Skipped {appointment_id} — appointment already past or "
-            f"within {REMINDER_MINUTES} min of now"
-        )
-        return fire_at
+    fire_at = now + timedelta(seconds=20)  # demo: fire 20s after booking confirmed
 
     scheduler.add_job(
         func=_send_reminder_job,

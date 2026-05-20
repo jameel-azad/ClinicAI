@@ -39,6 +39,20 @@ def get_appointments_by_number(from_number: str) -> list[AppointmentRecord]:
     return [a for a in _appointments.values() if a.from_number == from_number]
 
 
+def get_latest_appointment_for_patient(from_number: str) -> Optional[AppointmentRecord]:
+    appts = get_appointments_by_number(from_number)
+    if not appts:
+        return None
+    return max(appts, key=lambda a: a.confirmed_at)
+
+
+def cancel_appointment(appointment_id: str) -> bool:
+    if appointment_id in _appointments:
+        del _appointments[appointment_id]
+        return True
+    return False
+
+
 def mark_reminder_sent(appointment_id: str) -> None:
     appt = _appointments.get(appointment_id)
     if appt:

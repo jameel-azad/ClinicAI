@@ -1,22 +1,3 @@
-"""
-Dev startup script for ClinicAI.
-
-What it does:
-  1. Starts an ngrok HTTPS tunnel on port 8000
-  2. Reads the public URL from ngrok's local API
-  3. Writes PUBLIC_BASE_URL to .env automatically
-  4. Prints the Twilio webhook URL you need to paste in Twilio console
-  5. Starts uvicorn with --reload
-
-Usage:
-  python dev_start.py
-
-Prerequisites:
-  - ngrok installed and authenticated:
-      ngrok config add-authtoken <your_token>
-    (Free token at https://dashboard.ngrok.com)
-"""
-
 import json
 import os
 import subprocess

@@ -57,7 +57,7 @@ Create a `.env` file in the project root:
 # LLM
 GROQ_API_KEY=your_groq_key
 GROQ_MODEL=llama-3.3-70b-versatile
-WHISPER_MODEL=whisper-large-v3-turbo
+WHISPER_MODEL=whisper-large-v3
 GEMINI_API_KEY=your_gemini_key
 GEMINI_MODEL=gemini-2.5-flash
 

@@ -272,6 +272,14 @@ def _approve(approval: dict) -> str:
         time_str=appt.time_str,
     )
 
+    from app.services.scheduler import schedule_no_show_check
+    schedule_no_show_check(
+        to=appt.from_number,
+        appointment_id=appointment_id,
+        date_str=appt.date_str,
+        time_str=appt.time_str,
+    )
+
     send_whatsapp_message_sync(
         appt.from_number,
         (

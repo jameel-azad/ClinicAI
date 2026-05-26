@@ -92,6 +92,18 @@ async def twilio_webhook(
             pipeline = final_state.get("pipeline_log", [])
             print(f"[Graph] Pipeline: {' -> '.join(n.split(':')[0] for n in pipeline)}")
             print(f"[Graph] Reply: {reply[:80]}...")
+
+            # Persist session to Redis with last_bot_response for context-aware classification
+            if reply and final_state.get("session"):
+                from app.schemas import BookingSession
+                from app.services.store import save_session
+                try:
+                    sess_dict = dict(final_state["session"])
+                    sess_dict["last_bot_response"] = reply[:300]
+                    save_session(BookingSession(**sess_dict))
+                except Exception as sess_err:
+                    print(f"[WARN] Could not persist session: {sess_err}")
+
         except Exception as e:
             print(f"[ERROR] Booking graph failed: {e}")
             reply = (

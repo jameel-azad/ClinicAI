@@ -47,11 +47,13 @@ VALID_INTENTS = {
     "appointment_book",
     "appointment_cancel",
     "appointment_reschedule",
+    "appointment_status",
     "followup_query",
     "lab_report_share",
     "prescription_request",
     "general_query",
     "emergency",
+    "consultation_message",
 }
 
 EMPTY_ENTITIES = {
@@ -118,12 +120,16 @@ def _sanitise_multi_result(parsed: dict) -> list[dict]:
     return intents
 
 
-def _call_llm(llm, messages_history: list) -> list[dict]:
+def _call_llm(llm, messages_history: list, context_message: str | None = None) -> list[dict]:
     """Calls any LangChain-compatible LLM and returns a list of sanitised intent dicts."""
-    system_msg = SystemMessage(content=CLASSIFIER_SYSTEM_PROMPT + "\n\n" + CLASSIFIER_FEW_SHOT)
-    
+    system_content = CLASSIFIER_SYSTEM_PROMPT
+    if context_message:
+        system_content += f'\n\nPrevious bot message: "{context_message[:300]}"'
+    system_content += "\n\n" + CLASSIFIER_FEW_SHOT
+
+    system_msg = SystemMessage(content=system_content)
     llm_messages = [system_msg] + messages_history
-    
+
     response = llm.invoke(llm_messages)
     raw = response.content
     parsed = _parse_llm_output(raw)
@@ -193,9 +199,11 @@ def classify_node(state: ClassifierState) -> dict:
     if not messages_history:
         messages_history = [HumanMessage(content=state["processed_message"])]
 
+    context_message = state.get("context_message")
+
     try:
         llm = _get_groq_llm()
-        intents = _call_llm(llm, messages_history)
+        intents = _call_llm(llm, messages_history, context_message=context_message)
         result = intents[0]
 
         is_injection = False
@@ -229,7 +237,8 @@ def fallback_node(state: ClassifierState) -> dict:
     messages_history = state.get("messages", [])
     if not messages_history:
         messages_history = [HumanMessage(content=state["processed_message"])]
-    
+
+    context_message = state.get("context_message")
     llm = _get_gemini_llm()
 
     if llm is None:
@@ -250,7 +259,7 @@ def fallback_node(state: ClassifierState) -> dict:
         }
 
     try:
-        intents = _call_llm(llm, messages_history)
+        intents = _call_llm(llm, messages_history, context_message=context_message)
         result = intents[0]
 
         is_injection = False

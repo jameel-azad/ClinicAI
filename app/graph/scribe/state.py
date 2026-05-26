@@ -26,5 +26,7 @@ class ScribeState(TypedDict, total=False):
     missing_sections: list[str]
     ungrounded_flags: list[str]
     grounding_report: list[GroundingEntry]
+    follow_up_questions: list[str]     # 2-3 patient-appropriate follow-up questions
+    summary_for_whatsapp: Optional[str]  # <300 chars for WhatsApp delivery to doctor
     pdf_path: str
     errors: list[str]

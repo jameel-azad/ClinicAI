@@ -358,7 +358,97 @@ def grounding_check_node(state: ScribeState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 4: pdf_output_node
+# Node 4: followup_generator_node
+# ---------------------------------------------------------------------------
+
+FOLLOWUP_SYSTEM = """You are a clinical assistant helping Indian doctors communicate with patients.
+
+Given a SOAP note's Assessment and Plan sections, generate 2-3 follow-up questions for the patient.
+
+Rules:
+1. Questions must be in simple, non-clinical language a patient can understand.
+2. No medical jargon — say "blood pressure" not "hypertension", "sugar level" not "HbA1c".
+3. Questions should help the doctor check if the patient is recovering/following instructions.
+4. Tone: warm, friendly, caring — like a helpful clinic staff member.
+5. Mix Hindi and English naturally if appropriate (Hinglish is fine).
+6. Return ONLY a JSON array of question strings.
+
+Example output for a hypertension + headache case:
+["How are you feeling today? Has the headache reduced after starting the new medicine?",
+ "Have you been taking your blood pressure tablet every day as prescribed?",
+ "Have you checked your blood pressure at home? If yes, what was the reading?"]
+
+Return ONLY valid JSON array, no markdown, no explanation.
+"""
+
+
+def followup_generator_node(state: ScribeState) -> dict:
+    """
+    Generate 2-3 patient-appropriate follow-up questions from SOAP Assessment + Plan.
+    Also generates a <300-char WhatsApp summary for the doctor.
+    """
+    soap_note = state.get("soap_note", {})
+    errors = list(state.get("errors", []))
+
+    assessment = soap_note.get("assessment", {}).get("content", "")
+    plan = soap_note.get("plan", {}).get("content", "")
+    patient_name = state.get("patient_name") or soap_note.get("patient_name", "")
+
+    # Generate WhatsApp summary for doctor (≤300 chars)
+    subjective = soap_note.get("subjective", {}).get("content", "")
+    summary_parts = []
+    if patient_name:
+        summary_parts.append(f"Patient: {patient_name}")
+    if assessment:
+        assessment_short = assessment[:80].split(".")[0]
+        summary_parts.append(f"Dx: {assessment_short}")
+    if plan:
+        plan_short = plan[:80].split(".")[0]
+        summary_parts.append(f"Rx: {plan_short}")
+    summary_for_whatsapp = " | ".join(summary_parts)[:295]
+
+    if not assessment and not plan:
+        logger.warning("[followup] No assessment/plan — skipping follow-up generation")
+        return {
+            "follow_up_questions": [],
+            "summary_for_whatsapp": summary_for_whatsapp,
+            "errors": errors,
+        }
+
+    try:
+        llm = _llm()
+        prompt = f"Assessment:\n{assessment}\n\nPlan:\n{plan}"
+        messages = [
+            SystemMessage(content=FOLLOWUP_SYSTEM),
+            HumanMessage(content=prompt),
+        ]
+        response = llm.invoke(messages)
+        questions = _parse_json(response.content)
+
+        if not isinstance(questions, list):
+            questions = []
+        questions = [str(q) for q in questions[:3]]
+
+        logger.info(f"[followup] Generated {len(questions)} follow-up questions")
+        return {
+            "follow_up_questions": questions,
+            "summary_for_whatsapp": summary_for_whatsapp,
+            "errors": errors,
+        }
+
+    except Exception as e:
+        msg = f"Follow-up generation failed: {e}"
+        logger.warning(f"[followup] {msg}")
+        errors.append(msg)
+        return {
+            "follow_up_questions": [],
+            "summary_for_whatsapp": summary_for_whatsapp,
+            "errors": errors,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Node 5: pdf_output_node
 # ---------------------------------------------------------------------------
 
 def pdf_output_node(state: ScribeState) -> dict:

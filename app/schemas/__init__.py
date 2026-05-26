@@ -34,13 +34,11 @@ class IntentResult(BaseModel):
 
 
 class ClassifyResponse(BaseModel):
-    # ── Primary intent (highest confidence) — backward compatible ──────────────
     intent: str
     confidence: float
     entities: Entities
     bot_response: Optional[str] = None
 
-    # ── Multi-intent fields ───────────────────────────────────────────────────
     is_multi_intent: bool = Field(
         default=False,
         description="True if the message contains more than one intent"
@@ -73,6 +71,7 @@ class ClassifierState(TypedDict):
     from_number: str                    # Patient phone number
     raw_message: str                    # Original message exactly as received
     messages: Annotated[list[AnyMessage], add_messages]  # Chat memory
+    context_message: Optional[str]      # Previous bot response (for context-aware classification)
 
     # ── Set by: validate_node ──────────────────────────────────────────────────
     is_valid: bool                      # False if message is empty/invalid
@@ -104,22 +103,51 @@ class ClassifierState(TypedDict):
 
 # ── Booking Bot Models / State ────────────────────────────────────────────────
 
+# Booking sub-flow states (granular steps within a booking interaction)
 BOOKING_FLOW_STATES = [
     "GREETING",
+    "COLLECTING_INFO",
     "COLLECT_DATE_TIME",
     "COLLECT_DOCTOR_PREFERENCE",
     "CONFIRM_SLOT",
+    "WAITING_DOCTOR_APPROVAL",
     "BOOKED",
     "CANCEL_CONFIRM",
     "RESCHEDULE_COLLECTING",
     "RESCHEDULE_CONFIRM",
 ]
 
+# Patient journey states (high-level lifecycle — used by ConsultationAgent in Sprint 2)
+PATIENT_JOURNEY_STATES = [
+    "NEW_PATIENT",           # First contact, no appointment yet
+    "BOOKING_IN_PROGRESS",  # Actively booking an appointment
+    "AWAITING_CONFIRMATION", # Waiting for doctor to approve the slot
+    "BOOKED",               # Appointment confirmed and scheduled
+    "CONSULTATION_ACTIVE",  # Doctor and patient exchanging clinical messages
+    "POST_CONSULT",         # Consultation ended, SOAP generated
+    "FOLLOW_UP_PENDING",    # 24h after POST_CONSULT, follow-up questions due
+]
+
+# Full 10-intent set
+ALL_INTENTS = [
+    "appointment_book",
+    "appointment_cancel",
+    "appointment_reschedule",
+    "appointment_status",       # check status of existing booking
+    "followup_query",
+    "lab_report_share",
+    "prescription_request",
+    "general_query",
+    "emergency",
+    "consultation_message",     # message during active clinical consultation
+]
+
 
 class BookingSession(BaseModel):
-    """Per-user session stored in memory keyed by from_number."""
+    """Per-patient session — persisted to Redis, keyed by from_number."""
     from_number: str
     state: str = "GREETING"
+    journey_state: str = "NEW_PATIENT"       # high-level patient lifecycle state
     patient_name: Optional[str] = None
     requested_date: Optional[str] = None
     requested_time: Optional[str] = None
@@ -127,6 +155,7 @@ class BookingSession(BaseModel):
     symptoms: Optional[list[str]] = None
     new_requested_date: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     new_requested_time: Optional[str] = None   # used during RESCHEDULE_COLLECTING
+    last_bot_response: Optional[str] = None    # for context-aware classification
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

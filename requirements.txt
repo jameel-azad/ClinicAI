@@ -9,12 +9,17 @@ httpx==0.28.1
 pdfplumber==0.11.0
 pypdf==4.2.0
 reportlab==4.2.0
+pytesseract==0.3.13
+Pillow==11.2.1
 
 langgraph==0.3.5
 langchain-core==0.3.29
 langchain-groq==0.2.3
 langchain-google-genai==2.0.8
 groq==0.13.1
+
+redis==5.2.1
+hiredis==3.0.0
 
 twilio==9.3.6
 apscheduler==3.10.4

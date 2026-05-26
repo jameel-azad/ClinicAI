@@ -56,13 +56,51 @@ def _parse_json_response(text: str) -> Any:
 # Node 1: extract_text_node
 # ---------------------------------------------------------------------------
 
+def _ocr_fallback(pdf_path: str) -> str:
+    """
+    OCR fallback using pytesseract for scanned/handwritten lab reports.
+    Converts each PDF page to an image then runs Tesseract.
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+        import pypdf
+
+        reader = pypdf.PdfReader(pdf_path)
+        texts = []
+
+        for page_num in range(len(reader.pages)):
+            try:
+                # Try to extract embedded images from page
+                page = reader.pages[page_num]
+                if "/XObject" in page.get("/Resources", {}):
+                    xobjects = page["/Resources"]["/XObject"].get_object()
+                    for obj_name in xobjects:
+                        obj = xobjects[obj_name].get_object()
+                        if obj.get("/Subtype") == "/Image":
+                            import io
+                            data = obj.get_data()
+                            img = Image.open(io.BytesIO(data))
+                            text = pytesseract.image_to_string(img, lang="eng+hin")
+                            if text.strip():
+                                texts.append(text)
+            except Exception:
+                continue
+
+        return "\n".join(texts)
+
+    except ImportError:
+        logger.warning("[extract_text] pytesseract/Pillow not installed — OCR fallback unavailable")
+        return ""
+    except Exception as e:
+        logger.warning(f"[extract_text] OCR fallback failed: {e}")
+        return ""
+
+
 def extract_text_node(state: ReportState) -> dict:
     """
-    Use pdfplumber to extract all text from the PDF.
-
-    Returns raw concatenated text from all pages.
-    If extraction fails, stores an error and returns empty string
-    so downstream nodes degrade gracefully instead of crashing.
+    Extract text from PDF using pdfplumber (digital) with OCR fallback (scanned/handwritten).
+    Also extracts table data for structured lab report layouts.
     """
     pdf_path = state["pdf_path"]
     errors = list(state.get("errors", []))
@@ -71,13 +109,32 @@ def extract_text_node(state: ReportState) -> dict:
         pages_text = []
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                # Use layout=True to preserve spatial arrangement and avoid duplicate table text
+                # Extract regular text with layout preservation
                 plain = page.extract_text(layout=True)
                 if plain:
                     pages_text.append(plain)
 
-        raw_text = "\n".join(pages_text)
+                # Also extract table data (captures structured lab report tables)
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if row:
+                            row_text = " | ".join(str(cell or "") for cell in row)
+                            if row_text.strip() and row_text not in "\n".join(pages_text):
+                                pages_text.append(row_text)
+
+        raw_text = "\n".join(pages_text).strip()
         logger.info(f"[extract_text] Extracted {len(raw_text)} chars from {pdf_path}")
+
+        # OCR fallback if pdfplumber found almost nothing (scanned report)
+        if len(raw_text) < 100:
+            logger.info("[extract_text] Low text content — trying OCR fallback")
+            ocr_text = _ocr_fallback(pdf_path)
+            if ocr_text:
+                raw_text = ocr_text
+                logger.info(f"[extract_text] OCR extracted {len(raw_text)} chars")
+                errors.append("Note: Used OCR fallback — text accuracy may vary")
+
         return {"raw_text": raw_text, "errors": errors}
 
     except Exception as e:
@@ -121,6 +178,9 @@ def extract_all_node(state: ReportState) -> dict:
         response = llm.invoke(messages)
         result: dict = _parse_json_response(response.content)
 
+        # Capture detected panel type
+        panel_type = result.get("panel_type", "UNKNOWN").upper()
+
         # Parse patient info with hint merging
         pi = result.get("patient_info", {})
         patient_info: PatientInfo = {
@@ -152,10 +212,15 @@ def extract_all_node(state: ReportState) -> dict:
             })
 
         logger.info(
-            f"[extract_all] Patient: {patient_info.get('name')}, "
+            f"[extract_all] Panel: {panel_type}, Patient: {patient_info.get('name')}, "
             f"{len(all_values)} test values extracted"
         )
-        return {"patient_info": patient_info, "all_values": all_values, "errors": errors}
+        return {
+            "patient_info": patient_info,
+            "all_values": all_values,
+            "panel_type": panel_type,
+            "errors": errors,
+        }
 
     except Exception as e:
         msg = f"Combined extraction failed: {e}"
@@ -288,10 +353,12 @@ def flag_abnormals_node(state: ReportState) -> dict:
 def generate_summary_node(state: ReportState) -> dict:
     """
     Single LLM call that classifies criticals AND generates the doctor summary.
+    Uses panel_type context for accurate critical value thresholds.
     """
     patient_info = state.get("patient_info", {})
     abnormals = state.get("abnormals", [])
     all_values = state.get("all_values", [])
+    panel_type = state.get("panel_type", "UNKNOWN")
     errors = list(state.get("errors", []))
 
     name = patient_info.get("name") or "Unknown patient"
@@ -299,9 +366,10 @@ def generate_summary_node(state: ReportState) -> dict:
     gender = patient_info.get("gender") or ""
     gender_abbr = "M" if gender.lower().startswith("m") else ("F" if gender.lower().startswith("f") else gender)
 
-    # Build concise context
+    # Build concise context with panel type for LLM
     context_lines = [
         f"Patient: {name}, {age}{gender_abbr}",
+        f"Panel type: {panel_type}",
         f"Lab: {patient_info.get('lab_name', 'Unknown')}",
         f"Report date: {patient_info.get('report_date', 'Unknown')}",
         f"Total tests: {len(all_values)}",

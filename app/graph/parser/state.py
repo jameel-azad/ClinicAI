@@ -44,6 +44,7 @@ class ReportState(TypedDict, total=False):
 
     # --- Node outputs ---
     raw_text: str                        # Raw text extracted from PDF pages
+    panel_type: str                      # CBC|LFT|KFT|LIPID|THYROID|MIXED|UNKNOWN
     patient_info: PatientInfo            # Demographics extracted by LLM
 
     all_values: list[TestValue]          # All test rows

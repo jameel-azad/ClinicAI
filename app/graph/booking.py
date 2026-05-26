@@ -236,11 +236,28 @@ def _wants_to_stop(message: str) -> bool:
 
 def intent_node(state: BookingState) -> dict:
     from app.graph.classifier import classifier_graph
+    from app.services.store import get_session, update_last_active
 
+    from_number = state["from_number"]
     message = state["incoming_message"]
+
+    # Track last activity time (for no-show detection)
+    update_last_active(from_number)
+
+    # Load previous bot response for context-aware classification
+    context_message = None
+    session_dict = state.get("session")
+    if not session_dict:
+        redis_session = get_session(from_number)
+        if redis_session:
+            session_dict = redis_session.model_dump()
+    if session_dict:
+        context_message = session_dict.get("last_bot_response")
+
     initial = {
-        "from_number": state["from_number"],
+        "from_number": from_number,
         "raw_message": message,
+        "context_message": context_message,
         "is_valid": False, "validation_error": None,
         "processed_message": "", "intent": "general_query",
         "confidence": 0.0, "entities": {}, "bot_response": None,
@@ -260,16 +277,31 @@ def intent_node(state: BookingState) -> dict:
 
 
 def session_node(state: BookingState) -> dict:
+    from app.services.store import get_session, save_session
+
     existing = state.get("session")
 
+    # Redis fallback — handles server restarts where MemorySaver is empty
+    if not existing:
+        redis_session = get_session(state["from_number"])
+        if redis_session:
+            existing = redis_session.model_dump()
+
     if existing:
+        # Keep Redis in sync on every load (refreshes TTL)
+        try:
+            save_session(BookingSession(**existing))
+        except Exception:
+            pass
         return {
+            "session": existing,
             "is_new_session": False,
             "current_booking_state": existing.get("state", "GREETING"),
-            "pipeline_log": [f"session_node: loaded existing session state={existing.get('state')}"],
+            "pipeline_log": [f"session_node: loaded session state={existing.get('state')}"],
         }
     else:
         new_session = BookingSession(from_number=state["from_number"])
+        save_session(new_session)
         return {
             "session": new_session.model_dump(),
             "is_new_session": True,
@@ -706,6 +738,8 @@ def cancel_node(state: BookingState) -> dict:
             if appt:
                 cancel_appointment(appt.appointment_id)
                 cancel_reminder(appt.appointment_id)
+                from app.services.scheduler import cancel_no_show_jobs
+                cancel_no_show_jobs(appt.appointment_id)
                 doctor_number = find_doctor_number(appt.doctor_name)
                 if doctor_number:
                     send_whatsapp_message_sync(
@@ -819,14 +853,59 @@ def cancel_node(state: BookingState) -> dict:
 # ROUTING FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def appointment_status_node(state: BookingState) -> dict:
+    """
+    NODE — Appointment status check.
+    Tells patient whether they have an active confirmed appointment or pending approval.
+    """
+    from_number = state["from_number"]
+    appt = get_latest_appointment_for_patient(from_number)
+
+    if appt:
+        return {
+            "reply_message": (
+                f"✅ *Your appointment is confirmed!*\n\n"
+                f"👨‍⚕️ Doctor : *{appt.doctor_name}*\n"
+                f"📅 Date   : *{appt.date_str}*\n"
+                f"🕐 Time   : *{appt.time_str}*\n\n"
+                "We'll send you a reminder before your appointment. 🙏"
+            ),
+            "pipeline_log": ["appointment_status_node: confirmed appointment found"],
+        }
+
+    approval = get_latest_approval_for_patient(from_number)
+    if approval and approval.get("status") == "waiting_doctor":
+        return {
+            "reply_message": (
+                "⏳ Your appointment request is *waiting for doctor approval*.\n\n"
+                f"👨‍⚕️ Doctor : *{approval.get('doctor_name', '?')}*\n"
+                f"📅 Date   : *{approval.get('requested_date', '?')}*\n"
+                f"🕐 Time   : *{approval.get('requested_time', '?')}*\n\n"
+                "We'll notify you as soon as the doctor responds."
+            ),
+            "pipeline_log": ["appointment_status_node: pending approval found"],
+        }
+
+    return {
+        "reply_message": (
+            "You don't have any active appointment at the moment. "
+            "Would you like to book one? 😊"
+        ),
+        "pipeline_log": ["appointment_status_node: no appointment found"],
+    }
+
+
 def route_after_session(
     state: BookingState,
-) -> Literal["emergency_node", "flow_node", "off_topic_node", "confirm_node", "cancel_node", "reschedule_node"]:
+) -> Literal["emergency_node", "flow_node", "off_topic_node", "confirm_node", "cancel_node", "reschedule_node", "appointment_status_node"]:
     intent = state.get("intent", "general_query")
     booking_state = state.get("current_booking_state", "GREETING")
 
     if intent == "emergency":
         return "emergency_node"
+
+    if intent == "appointment_status":
+        return "appointment_status_node"
 
     # Mid-reschedule states always continue in reschedule_node
     if booking_state in ("RESCHEDULE_COLLECTING", "RESCHEDULE_CONFIRM"):
@@ -872,6 +951,7 @@ def build_booking_graph():
     g.add_node("confirm_node", confirm_node)
     g.add_node("cancel_node", cancel_node)
     g.add_node("reschedule_node", reschedule_node)
+    g.add_node("appointment_status_node", appointment_status_node)
 
     g.add_edge(START, "intent_node")
     g.add_edge("intent_node", "session_node")
@@ -885,6 +965,7 @@ def build_booking_graph():
             "confirm_node": "confirm_node",
             "cancel_node": "cancel_node",
             "reschedule_node": "reschedule_node",
+            "appointment_status_node": "appointment_status_node",
         },
     )
 
@@ -894,7 +975,7 @@ def build_booking_graph():
     g.add_edge("confirm_node", END)
     g.add_edge("cancel_node", END)
     g.add_edge("reschedule_node", END)
-
+    g.add_edge("appointment_status_node", END)
 
     memory = MemorySaver()
     return g.compile(checkpointer=memory)

@@ -1,11 +1,8 @@
 """
-FollowUpAgent — handles followup_query and prescription_request intents.
-
-If the patient is POST_CONSULT, acknowledges and tells them to check with doctor.
-Otherwise, directs them to book an appointment.
+FollowUpAgent — handles:
+  - followup_query / prescription_request intents
+  - Any message from a patient in POST_CONSULT or FOLLOW_UP_PENDING state
 """
-
-import os
 
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
@@ -14,44 +11,118 @@ from app.schemas import BookingState
 
 load_dotenv()
 
+import re as _re
+
+def _strip_dr(name: str) -> str:
+    return _re.sub(r"(?i)^dr\.?\s*", "", name).strip()
+
+
+_REPORT_KEYWORDS = {
+    "report", "pdf", "result", "send", "bhej", "bhejna", "bhejunga",
+    "share", "attach", "upload", "test", "lab",
+}
+
+
+def _mentions_report(message: str) -> bool:
+    msg_lower = message.lower()
+    return any(kw in msg_lower for kw in _REPORT_KEYWORDS)
+
 
 def followup_node(state: BookingState) -> dict:
     from app.services.store import get_latest_appointment_for_patient
+    from app.services.identity import find_doctor_number
+    from app.services.whatsapp import send_whatsapp_message_sync
 
     from_number = state["from_number"]
+    incoming = state.get("incoming_message", "")
     intent = state.get("intent", "general_query")
     session_dict = state.get("session") or {}
     journey_state = session_dict.get("journey_state", "NEW_PATIENT")
-    bot_response = state.get("bot_response")
 
+    appt = get_latest_appointment_for_patient(from_number)
+    raw_doctor = (
+        appt.doctor_name if appt
+        else session_dict.get("doctor_name")
+        or ""
+    )
+    doctor_name = _strip_dr(raw_doctor) if raw_doctor else "the doctor"
+    patient_name = (
+        (appt.patient_name if appt else None)
+        or session_dict.get("patient_name")
+        or ""
+    )
+
+    # ── FOLLOW_UP_PENDING: patient replied to the check-in message ────────────
+    if journey_state == "FOLLOW_UP_PENDING":
+        # Forward the patient's reply to the doctor as a summary
+        try:
+            doctor_number = find_doctor_number(raw_doctor) if appt else None
+            if doctor_number:
+                name_label = f"*{patient_name}*" if patient_name else "your patient"
+                doc_msg = (
+                    f"📋 Follow-up response from {name_label}:\n\n"
+                    f"{incoming}\n\n"
+                    f"_(Automated follow-up check-in reply)_"
+                )
+                send_whatsapp_message_sync(doctor_number, doc_msg)
+        except Exception as exc:
+            print(f"[followup_agent] Could not notify doctor: {exc}")
+
+        # Ack to patient — prompt to share report if they mentioned it
+        if _mentions_report(incoming):
+            reply = (
+                f"Thank you for the update{', ' + patient_name if patient_name else ''}! 😊 "
+                f"Glad to hear things are improving.\n\n"
+                f"Please share the blood test PDF here when it's ready and "
+                f"*Dr. {doctor_name}* will review it right away. 🏥"
+            )
+        else:
+            reply = (
+                f"Thank you for the update! 😊 "
+                f"*Dr. {doctor_name}* has been notified of your response.\n\n"
+                "If you need anything else or want to book a follow-up appointment, "
+                "just say *book appointment*. 🙏"
+            )
+
+        return {
+            "reply_message": reply,
+            "pipeline_log": ["followup_agent: FOLLOW_UP_PENDING — ack sent, doctor notified"],
+        }
+
+    # ── POST_CONSULT ───────────────────────────────────────────────────────────
     if journey_state == "POST_CONSULT":
+        if intent == "prescription_request":
+            return {
+                "reply_message": (
+                    f"📋 Your consultation note from *Dr. {doctor_name}* has been sent to you as a PDF — "
+                    "please check the file shared earlier for your prescription details.\n\n"
+                    "For any questions or to book a follow-up appointment, just say *book appointment*. 🙏"
+                ),
+                "pipeline_log": ["followup_agent: POST_CONSULT prescription_request"],
+            }
+
         return {
             "reply_message": (
-                "📋 Your recent consultation has been recorded.\n\n"
-                "The doctor will send prescriptions or follow-up instructions shortly via WhatsApp. "
-                "If you have an urgent query, please reply and the clinic will get back to you. 🙏"
+                f"✅ Your consultation with *Dr. {doctor_name}* has been recorded and the note has been sent to you.\n\n"
+                f"If *Dr. {doctor_name}* recommended a follow-up visit, they will reach out to you shortly. "
+                "To book your next appointment now, just say *book appointment*. 😊"
             ),
             "pipeline_log": ["followup_agent: POST_CONSULT response sent"],
         }
 
+    # ── prescription_request (no active post-consult session) ─────────────────
     if intent == "prescription_request":
-        appt = get_latest_appointment_for_patient(from_number)
         if appt:
             return {
                 "reply_message": (
-                    f"We'll note your prescription request for *{appt.doctor_name}*. "
+                    f"We'll note your prescription request for *Dr. {_strip_dr(appt.doctor_name)}*. "
                     "The doctor will review and send it to you shortly. 🙏\n\n"
                     "If urgent, please call the clinic directly."
                 ),
                 "pipeline_log": ["followup_agent: prescription request acknowledged"],
             }
 
-    if bot_response:
-        return {
-            "reply_message": bot_response,
-            "pipeline_log": ["followup_agent: used LLM bot_response"],
-        }
-
+    # ── Default ───────────────────────────────────────────────────────────────
     return {
         "reply_message": (
             "For follow-up queries or prescriptions, please book an appointment with the doctor.\n\n"

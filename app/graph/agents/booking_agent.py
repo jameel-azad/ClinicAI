@@ -86,6 +86,15 @@ MSG_NEED_DATE = (
     "_(e.g.'Date: 15th May 2026 and Time: 5 PM')_"
 )
 
+MSG_START_BOOKING = (
+    "Sure! To book your appointment, I'll need a few details:\n\n"
+    "👤 *Patient name*\n"
+    "📅 *Preferred date* (e.g. 28th May)\n"
+    "🕐 *Preferred time* (e.g. 5 PM)\n"
+    "👨‍⚕️ *Doctor's name*\n\n"
+    "_(You can share all at once or one by one — Hindi or English, both work!)_ 😊"
+)
+
 MSG_NEED_DOCTOR = "Which doctor would you like to see?\n_(e.g. 'Dr Mehta', 'Dr Sharma')_"
 
 MSG_OFF_TOPIC = (
@@ -172,6 +181,16 @@ def _word_match(message: str, words: set, phrases: set | None = None) -> bool:
         msg_lower = message.lower()
         return any(p in msg_lower for p in phrases)
     return False
+
+
+_BOOKING_KEYWORDS = {
+    "book", "appointment", "appoint", "booking", "schedule",
+    "milna", "dikhana", "dikha", "consult", "doctor",
+}
+
+def _has_booking_keywords(message: str) -> bool:
+    msg_lower = message.lower()
+    return any(kw in msg_lower for kw in _BOOKING_KEYWORDS)
 
 
 def _is_affirmative(message: str) -> bool:
@@ -312,6 +331,13 @@ def flow_node(state: BookingState) -> dict:
 
     session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
 
+    # If COLLECTING_INFO but no data collected yet, treat as a fresh GREETING
+    if booking_state == "COLLECTING_INFO" and not any([
+        session.patient_name, session.requested_date, session.requested_time, session.doctor_name
+    ]):
+        booking_state = "GREETING"
+        session.state = "GREETING"
+
     if entities.get("patient_name"): session.patient_name = entities["patient_name"]
     if entities.get("requested_date"): session.requested_date = entities["requested_date"]
     if entities.get("requested_time"): session.requested_time = entities["requested_time"]
@@ -325,14 +351,23 @@ def flow_node(state: BookingState) -> dict:
     if not session.doctor_name: missing.append("doctor_name")
 
     if missing:
-        session.state = "COLLECTING_INFO"
-        if booking_state == "GREETING" and state.get("intent") != "appointment_book":
+        is_booking = (
+            state.get("intent") == "appointment_book"
+            or _has_booking_keywords(state.get("incoming_message", ""))
+        )
+
+        if is_booking or booking_state not in ("GREETING",):
+            session.state = "COLLECTING_INFO"
+
+        if booking_state == "GREETING" and not is_booking:
             reply = MSG_GREETING
+        elif booking_state == "GREETING" and is_booking:
+            reply = MSG_START_BOOKING
         else:
-            reply = bot_response or MSG_GREETING
+            reply = bot_response or MSG_START_BOOKING
         return {
             "session": session.model_dump(),
-            "current_booking_state": "COLLECTING_INFO",
+            "current_booking_state": session.state,
             "reply_message": reply,
             "pipeline_log": [f"flow_node: COLLECTING_INFO — missing {missing}"],
         }

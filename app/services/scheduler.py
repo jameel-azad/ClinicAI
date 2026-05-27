@@ -13,6 +13,8 @@ load_dotenv()
 REMINDER_MINUTES = int(os.getenv("REMINDER_MINUTES_BEFORE", "120"))  # 2 hours default
 _DEMO_REMINDER_DELAY = os.getenv("DEMO_REMINDER_DELAY_MINUTES", "").strip()  # e.g. "2" for demo
 CONSULTATION_TIMEOUT_MINUTES = int(os.getenv("CONSULTATION_TIMEOUT_MINUTES", "30"))
+FOLLOWUP_DEFAULT_DAYS = int(os.getenv("FOLLOWUP_DEFAULT_DAYS", "2"))  # days if doctor doesn't mention
+_DEMO_FOLLOWUP_DELAY = os.getenv("DEMO_FOLLOWUP_DELAY_MINUTES", "").strip()  # e.g. "3" for demo
 _TZ_NAME = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata")
 _CLINIC_OPEN_HOUR = int(os.getenv("CLINIC_OPEN_HOUR", "9"))
 
@@ -339,3 +341,91 @@ def schedule_afterhours_flush(doctor_number: str) -> None:
         replace_existing=True,
     )
     print(f"[AfterHours] Flush scheduled daily at {_CLINIC_OPEN_HOUR:02d}:00 IST for {doctor_number}")
+
+
+# ── Follow-up check-in jobs ────────────────────────────────────────────────────
+
+def _strip_dr_prefix(name: str) -> str:
+    """Remove leading 'Dr.' / 'Dr ' so templates can add it consistently."""
+    import re as _re
+    return _re.sub(r"(?i)^dr\.?\s*", "", name).strip()
+
+
+def _followup_message_job(
+    patient_number: str,
+    patient_name: str,
+    doctor_name: str,
+    follow_up_questions: list,
+) -> None:
+    """Fires on the follow-up day — sends check-in questions to the patient."""
+    from app.services.whatsapp import send_whatsapp_message_sync
+    from app.services.store import get_session, save_session
+    from app.schemas import BookingSession
+
+    clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
+    name_greeting = f"Hi {patient_name}! 👋" if patient_name else "Hi! 👋"
+    dr_name = _strip_dr_prefix(doctor_name)
+
+    if follow_up_questions:
+        questions_text = "\n".join(f"• {q}" for q in follow_up_questions)
+        body = (
+            f"{name_greeting}\n\n"
+            f"*{clinic_name}* — Follow-up Check-in 🏥\n\n"
+            f"*Dr. {dr_name}* wanted to check in on you today:\n\n"
+            f"{questions_text}\n\n"
+            "To book a follow-up appointment, just reply *book appointment*. 😊"
+        )
+    else:
+        body = (
+            f"{name_greeting}\n\n"
+            f"*{clinic_name}* — Follow-up Check-in 🏥\n\n"
+            f"*Dr. {dr_name}* wanted to check in on you. How are you feeling? 😊\n\n"
+            "To book a follow-up appointment, just reply *book appointment*."
+        )
+
+    send_whatsapp_message_sync(patient_number, body)
+    print(f"[FollowUp] Check-in sent to {patient_number}")
+
+    try:
+        session = get_session(patient_number) or BookingSession(from_number=patient_number)
+        session.journey_state = "FOLLOW_UP_PENDING"
+        session.state = "BOOKED"  # prevent booking flow from re-triggering
+        save_session(session)
+    except Exception as exc:
+        print(f"[FollowUp] Could not update journey_state: {exc}")
+
+
+def schedule_followup_message(
+    patient_number: str,
+    patient_name: str,
+    doctor_name: str,
+    follow_up_questions: list,
+    follow_up_days: int | None,
+) -> None:
+    """Schedule the follow-up check-in message.
+
+    Uses follow_up_days from the SOAP note (doctor-specified).
+    Falls back to FOLLOWUP_DEFAULT_DAYS if the doctor didn't mention a date.
+    In demo mode (DEMO_FOLLOWUP_DELAY_MINUTES set), fires after N minutes instead.
+    """
+    tz = ZoneInfo(_TZ_NAME)
+    now = datetime.now(tz)
+
+    if _DEMO_FOLLOWUP_DELAY:
+        delay_mins = int(_DEMO_FOLLOWUP_DELAY)
+        fire_at = now + timedelta(minutes=delay_mins)
+        print(f"[FollowUp] DEMO MODE — firing in {delay_mins} min for {patient_number}")
+    else:
+        days = follow_up_days if follow_up_days and follow_up_days > 0 else FOLLOWUP_DEFAULT_DAYS
+        fire_at = now + timedelta(days=days)
+        source = "doctor-specified" if follow_up_days else f"default ({FOLLOWUP_DEFAULT_DAYS}d)"
+        print(f"[FollowUp] Scheduled in {days} day(s) ({source}) at {fire_at.strftime('%Y-%m-%d %H:%M')} for {patient_number}")
+
+    scheduler.add_job(
+        func=_followup_message_job,
+        trigger=DateTrigger(run_date=fire_at),
+        args=[patient_number, patient_name, doctor_name, follow_up_questions],
+        id=f"followup_{patient_number}",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )

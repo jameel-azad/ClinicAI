@@ -134,6 +134,7 @@ Return ONLY valid JSON (no markdown, no preamble) matching this schema:
   "patient_name": "<patient name if mentioned, else empty string>",
   "doctor_name": "<doctor name if mentioned, else empty string>",
   "date": "<date of consultation if mentioned, else empty string>",
+  "follow_up_days": <integer days until follow-up if doctor mentioned it (e.g. "2 weeks" → 14, "1 month" → 30, "3 days" → 3), or null if not mentioned>,
   "subjective": {
     "content": "<Chief complaint and history of presenting illness in patient's words / as reported by doctor>",
     "confidence": <0.0 to 1.0>,
@@ -170,6 +171,7 @@ Expected output:
   "patient_name": "Suresh",
   "doctor_name": "",
   "date": "",
+  "follow_up_days": 14,
   "subjective": {
     "content": "Patient: Suresh, 45 years. Presenting complaint not explicitly described beyond blood pressure evaluation. No chest pain.",
     "confidence": 0.55,
@@ -235,9 +237,15 @@ def soap_generator_node(state: ScribeState) -> dict:
                 if sec.get("is_missing") or sec.get("confidence", 1.0) < 0.5:
                     missing.append(section)
 
-            print(f"[soap_gen] Success — missing={missing}")
+            follow_up_days = soap_raw.get("follow_up_days")
+            print(f"[soap_gen] Success — missing={missing}, follow_up_days={follow_up_days}")
             logger.info(f"[soap_gen] Success — missing sections: {missing}")
-            return {"soap_note": soap_raw, "missing_sections": missing, "errors": errors}
+            return {
+                "soap_note": soap_raw,
+                "missing_sections": missing,
+                "follow_up_days": follow_up_days,
+                "errors": errors,
+            }
 
         except Exception as e:
             last_error = e

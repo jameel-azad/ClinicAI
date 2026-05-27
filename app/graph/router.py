@@ -47,7 +47,8 @@ EMPTY_ENTITIES = {
 def after_hours_check_node(state: BookingState) -> dict:
     """Pre-check: if clinic is closed, queue message and return ack. Sets reply_message."""
     if is_clinic_open():
-        return {"pipeline_log": ["router: clinic open — continuing"]}
+        # Reset any stale reply_message from the MemorySaver checkpoint
+        return {"reply_message": "", "pipeline_log": ["router: clinic open — continuing"]}
 
     result = after_hours_agent_graph.invoke({
         "from_number": state["from_number"],
@@ -112,11 +113,19 @@ def intent_node(state: BookingState) -> dict:
 def session_node(state: BookingState) -> dict:
     from app.services.store import get_session, save_session
 
+    # Prefer MemorySaver checkpoint for booking flow state (keeps in-progress
+    # bookings intact across messages). But always pull journey_state from Redis
+    # because background jobs (scheduler) write there and bypass the checkpoint.
     existing = state.get("session")
     if not existing:
         redis_session = get_session(state["from_number"])
         if redis_session:
             existing = redis_session.model_dump()
+    else:
+        redis_session = get_session(state["from_number"])
+        if redis_session and redis_session.journey_state != existing.get("journey_state"):
+            existing = dict(existing)
+            existing["journey_state"] = redis_session.journey_state
 
     if existing:
         try:
@@ -242,6 +251,11 @@ def route_after_session(
         return "lab_dispatch_node"
 
     if intent in ("followup_query", "prescription_request"):
+        return "followup_dispatch_node"
+
+    # Any message from a POST_CONSULT or FOLLOW_UP_PENDING patient goes to
+    # followup regardless of what the classifier returned
+    if journey_state in ("POST_CONSULT", "FOLLOW_UP_PENDING"):
         return "followup_dispatch_node"
 
     return "booking_dispatch_node"

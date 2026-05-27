@@ -1,7 +1,9 @@
+import asyncio
 import os
 import re
 import shutil
 import tempfile
+import traceback
 import uuid
 from pathlib import Path
 
@@ -54,12 +56,16 @@ async def handle_doctor_voice_note(
 
     audio_path = None
     try:
+        print(f"[Scribe] Downloading audio from Twilio...")
         audio_path = await _download_audio(media_url, media_content_type)
-        result = _run_scribe_pipeline(
+        print(f"[Scribe] Audio saved to {audio_path}, running scribe pipeline...")
+        result = await asyncio.to_thread(
+            _run_scribe_pipeline,
             audio_path=audio_path,
             doctor_name=doctor_name,
             patient_hint=_patient_hint_from_caption(caption),
         )
+        print(f"[Scribe] Pipeline done. errors={result.get('errors', [])}")
 
         pipeline_errors = result.get("errors", [])
         for err in pipeline_errors:
@@ -76,12 +82,16 @@ async def handle_doctor_voice_note(
 
         # Store pending prescription — doctor must approve before it reaches the patient
         soap_id = "RX" + str(uuid.uuid4())[:6].upper()
+        follow_up_questions = result.get("follow_up_questions") or []
+        follow_up_days = result.get("follow_up_days")  # None if doctor didn't mention
         from app.services.store import save_pending_soap
         save_pending_soap(soap_id, {
             "document_id": document_id,
             "patient_number": patient_number,
             "patient_name": patient_name,
             "doctor_number": doctor_number,
+            "follow_up_questions": follow_up_questions,
+            "follow_up_days": follow_up_days,
         })
 
         public_url = _public_pdf_url(document_id)
@@ -131,6 +141,7 @@ async def handle_doctor_voice_note(
 
         return "Voice note transcribed. Prescription note sent to you for review — approve it to deliver to the patient."
     except Exception as exc:
+        print(f"[Scribe] UNHANDLED ERROR:\n{traceback.format_exc()}")
         return f"Sorry, I could not process the doctor's voice note: {exc}"
     finally:
         if audio_path and os.path.exists(audio_path):
@@ -163,7 +174,7 @@ async def _download_audio(media_url: str, media_content_type: str | None) -> str
     auth = (account_sid, auth_token) if account_sid and auth_token else None
     suffix = SUPPORTED_AUDIO_CONTENT_TYPES.get((media_content_type or "").lower(), ".ogg")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(media_url, auth=auth, follow_redirects=True)
         response.raise_for_status()
 

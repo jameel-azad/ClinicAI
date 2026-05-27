@@ -62,9 +62,14 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
 
     delete_pending_soap(soap_id)
 
+    follow_up_questions = soap.get("follow_up_questions") or []
+    follow_up_days = soap.get("follow_up_days")
+
     if public_url:
         sent = send_whatsapp_media_sync(patient_number, body, public_url)
         if sent:
+            _mark_post_consult(patient_number)
+            _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days)
             return f"✅ Prescription note approved and sent to {patient_number}."
         return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please send manually."
 
@@ -91,3 +96,42 @@ def _scribe_pdf_url(document_id: str | None) -> str | None:
     if not base_url:
         return None
     return f"{base_url}/scribe/pdf/{document_id}"
+
+
+def _mark_post_consult(patient_number: str) -> None:
+    """Transition patient session to POST_CONSULT so follow-up messages route correctly."""
+    try:
+        from app.services.store import get_session, save_session
+        from app.schemas import BookingSession
+        session = get_session(patient_number) or BookingSession(from_number=patient_number)
+        session.journey_state = "POST_CONSULT"
+        save_session(session)
+        print(f"[SOAP] journey_state → POST_CONSULT for {patient_number}")
+    except Exception as exc:
+        print(f"[SOAP] Could not update patient session to POST_CONSULT: {exc}")
+
+
+def _schedule_followup(
+    patient_number: str,
+    patient_name: str,
+    doctor_number: str,
+    follow_up_questions: list,
+    follow_up_days: int | None,
+) -> None:
+    """Schedule the follow-up check-in message for the patient."""
+    try:
+        from app.services.store import get_latest_appointment_for_patient
+        from app.services.scheduler import schedule_followup_message
+
+        appt = get_latest_appointment_for_patient(patient_number)
+        doctor_name = appt.doctor_name if appt else doctor_number
+
+        schedule_followup_message(
+            patient_number=patient_number,
+            patient_name=patient_name or "",
+            doctor_name=doctor_name,
+            follow_up_questions=follow_up_questions,
+            follow_up_days=follow_up_days,
+        )
+    except Exception as exc:
+        print(f"[SOAP] Could not schedule follow-up message: {exc}")

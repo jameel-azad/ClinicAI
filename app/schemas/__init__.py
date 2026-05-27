@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, Annotated
+from typing import Optional, Annotated, Literal
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
@@ -188,3 +188,27 @@ class BookingState(TypedDict):
     appointment_id: Optional[str]
     is_off_topic: bool
     pipeline_log: Annotated[list[str], operator.add]
+
+
+# ── Consultation Models (Sprint 2) ────────────────────────────────────────────
+
+class ConsultationMessage(BaseModel):
+    sender_role: Literal["doctor", "patient"]
+    text: Optional[str] = None
+    audio_url: Optional[str] = None
+    duration_secs: Optional[float] = None
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class ConsultationSession(BaseModel):
+    consultation_id: str                    # "CONS" + 6-char uuid
+    patient_number: str
+    doctor_number: str
+    doctor_name: str
+    appointment_id: Optional[str] = None
+    messages: list[ConsultationMessage] = Field(default_factory=list)
+    audio_files: list[dict] = Field(default_factory=list)   # {url, duration_secs} for Jameel bundle
+    started_at: datetime = Field(default_factory=datetime.now)
+    last_activity: datetime = Field(default_factory=datetime.now)
+    is_active: bool = True
+    ended_reason: Optional[str] = None      # "closing_phrase" | "inactivity"

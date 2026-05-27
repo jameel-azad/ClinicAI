@@ -6,11 +6,14 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
 
 REMINDER_MINUTES = int(os.getenv("REMINDER_MINUTES_BEFORE", "120"))  # 2 hours default
+CONSULTATION_TIMEOUT_MINUTES = int(os.getenv("CONSULTATION_TIMEOUT_MINUTES", "30"))
 _TZ_NAME = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata")
+_CLINIC_OPEN_HOUR = int(os.getenv("CLINIC_OPEN_HOUR", "9"))
 
 _MONTHS = {
     "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
@@ -77,9 +80,11 @@ def _send_reminder_job(to: str, appointment_id: str, doctor: str, date_str: str,
     from app.services.store import mark_reminder_sent
 
     clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
+    mins = REMINDER_MINUTES
+    time_label = f"{mins // 60} hour{'s' if mins // 60 != 1 else ''}" if mins >= 60 else f"{mins} minute{'s' if mins != 1 else ''}"
     body = (
         f"⏰ *Reminder — {clinic_name}*\n\n"
-        f"Your appointment with *{doctor}* is in 2 hours!\n"
+        f"Your appointment with *{doctor}* is in {time_label}!\n"
         f"📅 {date_str}  🕐 {time_str}\n\n"
         f"Please arrive 5–10 minutes early. Reply if you need to reschedule."
     )
@@ -232,3 +237,96 @@ def cancel_no_show_jobs(appointment_id: str) -> None:
             scheduler.remove_job(job_id)
         except Exception:
             pass
+
+
+# ── Consultation timeout jobs ──────────────────────────────────────────────────
+
+def _consultation_timeout_job(patient_number: str, consultation_id: str) -> None:
+    """Fires after CONSULTATION_TIMEOUT_MINUTES of inactivity. Finalises the consultation."""
+    import asyncio
+    from app.services.store import get_consultation, save_consultation
+
+    session = get_consultation(patient_number)
+    if not session or not session.is_active or session.consultation_id != consultation_id:
+        return
+
+    session.ended_reason = "inactivity"
+    session.is_active = False
+    save_consultation(patient_number, session)
+
+    print(f"[Consultation] Timeout fired for {patient_number} — finalising")
+    try:
+        from app.services.consultation_service import finalize_and_send
+        asyncio.run(finalize_and_send(patient_number))
+    except Exception as exc:
+        print(f"[Consultation] Timeout finalisation failed for {patient_number}: {exc}")
+
+
+def schedule_consultation_timeout(patient_number: str, consultation_id: str) -> None:
+    """Schedule or reset the 30-min inactivity timer (replace_existing=True resets the clock)."""
+    tz = ZoneInfo(_TZ_NAME)
+    fire_at = datetime.now(tz) + timedelta(minutes=CONSULTATION_TIMEOUT_MINUTES)
+    scheduler.add_job(
+        func=_consultation_timeout_job,
+        trigger=DateTrigger(run_date=fire_at),
+        args=[patient_number, consultation_id],
+        id=f"consult_timeout_{patient_number}",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    print(f"[Consultation] Timeout set for {patient_number} at {fire_at.strftime('%H:%M')} ({CONSULTATION_TIMEOUT_MINUTES} min)")
+
+
+def reset_consultation_timeout(patient_number: str, consultation_id: str) -> None:
+    """Reset the inactivity timer on any new message."""
+    schedule_consultation_timeout(patient_number, consultation_id)
+
+
+def cancel_consultation_timeout(patient_number: str) -> None:
+    try:
+        scheduler.remove_job(f"consult_timeout_{patient_number}")
+        print(f"[Consultation] Timeout cancelled for {patient_number}")
+    except Exception:
+        pass
+
+
+# ── After-hours flush jobs ─────────────────────────────────────────────────────
+
+def _flush_afterhours_job(doctor_number: str) -> None:
+    """Runs at clinic open time — re-injects queued after-hours messages into router_graph."""
+    from app.services.store import get_after_hours_queue, clear_after_hours_queue
+
+    queued = get_after_hours_queue(doctor_number)
+    if not queued:
+        return
+
+    print(f"[AfterHours] Flushing {len(queued)} queued messages for doctor {doctor_number}")
+    clear_after_hours_queue(doctor_number)
+
+    try:
+        from app.graph.router import router_graph
+        for item in queued:
+            from_number = item.get("from_number", "")
+            body = item.get("body", "")
+            if not from_number or not body:
+                continue
+            config = {"configurable": {"thread_id": from_number}}
+            state_update = {"from_number": from_number, "incoming_message": body}
+            try:
+                router_graph.invoke(state_update, config=config)
+            except Exception as msg_exc:
+                print(f"[AfterHours] Failed to re-inject message from {from_number}: {msg_exc}")
+    except Exception as exc:
+        print(f"[AfterHours] Flush job failed: {exc}")
+
+
+def schedule_afterhours_flush(doctor_number: str) -> None:
+    """Register a daily cron job to flush the after-hours queue at clinic open time."""
+    scheduler.add_job(
+        func=_flush_afterhours_job,
+        trigger=CronTrigger(hour=_CLINIC_OPEN_HOUR, minute=0, timezone=_TZ_NAME),
+        args=[doctor_number],
+        id=f"afterhours_flush_{doctor_number}",
+        replace_existing=True,
+    )
+    print(f"[AfterHours] Flush scheduled daily at {_CLINIC_OPEN_HOUR:02d}:00 IST for {doctor_number}")

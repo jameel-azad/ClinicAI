@@ -4,13 +4,14 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-from app.graph.booking import booking_graph
+from app.graph.router import router_graph
 from app.services.clinical_scribe import get_scribe_pdf_path, handle_doctor_voice_note
 from app.services.pdf_service import get_lab_pdf_path
 from app.services.doctor import handle_doctor_message
 from app.services.identity import all_doctor_numbers, identify_sender
 from app.services.store import (
     all_appointments,
+    all_consultations,
     all_doctor_profiles,
     all_pending_approvals,
     all_sessions,
@@ -87,7 +88,7 @@ async def twilio_webhook(
         }
 
         try:
-            final_state = booking_graph.invoke(state_update, config=config)
+            final_state = router_graph.invoke(state_update, config=config)
             reply = final_state.get("reply_message", "")
             pipeline = final_state.get("pipeline_log", [])
             print(f"[Graph] Pipeline: {' -> '.join(n.split(':')[0] for n in pipeline)}")
@@ -149,6 +150,12 @@ async def debug_pending_approvals():
 async def debug_doctors():
     """Shows saved doctor profiles. For development only."""
     return {"doctor_profiles": all_doctor_profiles()}
+
+
+@router.get("/debug/consultations")
+async def debug_consultations():
+    """Shows all active/recent consultation sessions. For development only."""
+    return {"consultations": all_consultations()}
 
 
 @router.get("/lab-report/pdf/{document_id}", include_in_schema=False)

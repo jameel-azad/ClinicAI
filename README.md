@@ -1,49 +1,83 @@
-# ClinicAI
+# ClinicAI — Sprint 2
 
-ClinicAI is a FastAPI + LangGraph backend for a WhatsApp-based clinic assistant. It handles patient appointment booking with doctor approval, lab report analysis, doctor voice note transcription into SOAP note PDFs, and WhatsApp interactive button support for doctor approvals — all through Twilio webhooks.
+ClinicAI is a WhatsApp-native clinic assistant built on FastAPI + LangGraph. It covers the full patient lifecycle — appointment booking, real-time consultation orchestration, clinical SOAP note generation, lab report parsing, and post-visit follow-up — entirely over WhatsApp using Twilio.
+
+**Sprint 2** refactors the single booking pipeline into a full multi-agent system: `RouterAgent → {BookingAgent, ConsultationAgent, EmergencyAgent, AfterHoursAgent, LabAgent, FollowUpAgent}` with a Jameel-side clinical scribe pipeline that converts consultation bundles into SOAP note PDFs.
+
+---
 
 ## Features
 
-- WhatsApp patient assistant through Twilio webhooks.
-- Personalised greeting for new patients (receptionist style) and doctors (feature overview), each triggered at the right moment.
-- Intent classification for appointment booking, cancellation, rescheduling, follow-up, lab reports, prescriptions, general queries, and emergencies.
-- Bilingual support — patients can reply in Hindi or English (Hinglish included).
-- Appointment booking flow: patient → AI collects details → doctor approves via WhatsApp buttons → patient notified.
-- **WhatsApp interactive buttons** for doctor approval of appointments and SOAP notes — no typing required.
-- Doctor voice note → Whisper transcription → SOAP note → PDF sent to doctor for review → doctor approves → PDF delivered to patient.
-- Lab report PDF from patient → safety check → AI extraction and summary → forwarded to the patient's doctor (requires prior booking).
-- Doctor-side WhatsApp commands for pending approvals, today's appointments, setup, and profile.
-- Optional Google Calendar availability checks, slot suggestions, and event creation.
-- Appointment reminder scheduling with APScheduler, fired at the correct time before the appointment.
-- `dev_start.py` one-command dev startup: launches ngrok, auto-writes `PUBLIC_BASE_URL` to `.env`, prints the Twilio webhook URL, then starts uvicorn.
+- **Multi-agent routing** — RouterAgent classifies intent, checks clinic hours, and dispatches to the correct specialist agent per message.
+- **10-intent classifier** — Groq LLaMA 3.3 70B with Gemini 2.5 Flash fallback; bilingual Hindi/English (Hinglish); context-aware using previous bot response.
+- **Appointment booking** — Multi-turn state machine; doctor approval via WhatsApp interactive buttons or text; Google Calendar integration (optional).
+- **ConsultationAgent** — Buffers all patient text + doctor voice notes into a `ConsultationSession`; ends on closing phrase or inactivity timeout; triggers full SOAP pipeline.
+- **Clinical scribe pipeline** — Consultation bundle → Whisper transcription → LLaMA SOAP generation → grounding check → follow-up questions → ReportLab PDF → delivered to doctor via WhatsApp.
+- **Single voice note scribe** — Doctor sends standalone voice note → Whisper → SOAP PDF → doctor approves → sent to patient.
+- **Lab report parsing** — Patient sends PDF → pdfplumber extraction → Groq summary → forwarded to doctor.
+- **After-hours agent** — Messages outside clinic hours queued to Redis, re-injected at opening time.
+- **Emergency agent** — Instant 112 response to patient + alert to all configured doctors.
+- **APScheduler jobs** — Appointment reminder, no-show recovery (×2), consultation inactivity timeout, daily after-hours flush.
+- **Redis persistence** — All sessions, appointments, consultations, approvals stored in Redis with TTLs; in-memory fallback for dev.
+- **`dev_start.py`** — One-command dev startup: ngrok + auto-writes `PUBLIC_BASE_URL` to `.env` + uvicorn.
+
+---
 
 ## Project Structure
 
-```text
-main.py                          FastAPI app entry point
-dev_start.py                     Dev startup: ngrok + uvicorn + .env auto-update
-app/api/webhook_router.py        Twilio WhatsApp webhook and file-serving routes
-app/graph/classifier.py          Intent classifier LangGraph
-app/graph/booking.py             Appointment booking LangGraph state machine
-app/graph/parser/                Lab report parser pipeline
-app/graph/scribe/                Doctor voice note → SOAP PDF pipeline
-app/services/appointment_approval.py  Appointment approval logic + button handler
-app/services/soap_approval.py    SOAP note approval logic + button handler
-app/services/clinical_scribe.py  Voice note download, pipeline orchestration, PDF storage
-app/services/pdf_service.py      Lab report download, safety check, forwarding to doctor
-app/services/doctor.py           Doctor message routing (buttons, SOAP, appointments, commands)
-app/services/whatsapp.py         Twilio send helpers (text, media, template/buttons)
-app/services/scheduler.py        APScheduler appointment reminders
-app/services/store.py            In-memory stores: sessions, appointments, approvals, SOAPs
-app/services/identity.py         Doctor number resolution and sender identification
-app/prompts/                     LLM system prompts
-app/schemas/                     Pydantic models and graph state types
-scripts/google_calendar_auth.py  Google Calendar OAuth helper
 ```
+main.py                                   FastAPI entry point, lifespan, router registration
+dev_start.py                              Dev startup: ngrok + uvicorn + .env auto-update
+
+app/
+├── api/
+│   ├── webhook_router.py                 Twilio webhook, doctor/patient routing, debug endpoints
+│   ├── classifier_router.py              POST /classify — direct HTTP classifier test
+│   ├── parser_router.py                  POST /parse-lab-report
+│   └── scribe_router.py                  POST /scribe/consult — Jameel scribe API endpoint
+│
+├── graph/
+│   ├── classifier.py                     Intent classification pipeline (6-node LangGraph)
+│   ├── router.py                         RouterAgent — top-level orchestrator (8-node LangGraph)
+│   ├── booking.py                        Backward-compat shim → router_graph
+│   ├── agents/
+│   │   ├── booking_agent.py              Multi-turn booking state machine
+│   │   ├── consultation_agent.py         Consultation session lifecycle (Sprint 2 core)
+│   │   ├── emergency_agent.py            Emergency response + doctor alert
+│   │   ├── after_hours_agent.py          Queue + ack for out-of-hours messages
+│   │   ├── followup_agent.py             Post-consultation follow-up handling
+│   │   └── lab_agent.py                  Lab report intent (no PDF attached)
+│   ├── scribe/
+│   │   ├── pipeline.py                   Single-voice-note scribe LangGraph
+│   │   ├── nodes.py                      Whisper, SOAP generator, grounding check, follow-up, PDF
+│   │   ├── state.py                      ScribeState TypedDict
+│   │   └── pdf_builder.py               ReportLab SOAP PDF builder
+│   └── parser/                           Lab report extraction pipeline
+│
+├── services/
+│   ├── store.py                          Redis + in-memory dual persistence layer
+│   ├── scheduler.py                      APScheduler jobs (reminder, no-show, timeout, flush)
+│   ├── consultation_service.py           Consultation bundle builder + Jameel API caller
+│   ├── scribe_service.py                 Jameel-side: bundle → transcribe → SOAP → PDF
+│   ├── clinical_scribe.py               Single voice note download + scribe orchestration
+│   ├── appointment_approval.py           Approval workflow + button handler
+│   ├── soap_approval.py                  SOAP approval workflow + button handler
+│   ├── pdf_service.py                    Lab report download + forwarding
+│   ├── doctor.py                         Doctor message command router
+│   ├── doctor_setup.py                   Doctor onboarding (5-step WhatsApp flow)
+│   ├── whatsapp.py                       Twilio send helpers (text, media, template/buttons)
+│   ├── identity.py                       Sender identification (doctor vs patient)
+│   └── google_calendar.py               Google Calendar availability + event creation
+│
+├── prompts/                              LLM system prompts (classifier, SOAP, booking entities)
+└── schemas/                              Pydantic models, TypedDicts, intent/state constants
+```
+
+---
 
 ## Setup
 
-Create and activate a virtual environment, then install dependencies:
+### 1. Install dependencies
 
 ```powershell
 python -m venv venv
@@ -51,7 +85,15 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the project root:
+### 2. Start Redis
+
+```powershell
+docker run -d -p 6379:6379 redis
+```
+
+Or use a local Redis service. The app falls back to in-memory stores if Redis is unavailable (state lost on restart).
+
+### 3. Create `.env`
 
 ```env
 # LLM
@@ -66,238 +108,511 @@ TWILIO_ACCOUNT_SID=your_twilio_sid
 TWILIO_AUTH_TOKEN=your_twilio_token
 TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 
-# Doctors (Name:number pairs, comma-separated)
-DOCTOR_WHATSAPP_NUMBERS=Dr Nabil:+919999999999,Dr Jameel:+918888888888
-
-# Public URL (written automatically by dev_start.py when using ngrok)
-PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app
+# Doctors — comma-separated "Name:+91number" pairs
+DOCTOR_WHATSAPP_NUMBERS=Dr Jameel:+919801581020
 
 # Clinic
 CLINIC_NAME=ClinicAI
-REMINDER_MINUTES_BEFORE=5
+CLINIC_OPEN_HOUR=9
+CLINIC_CLOSE_HOUR=20
 
-# WhatsApp button templates (optional — falls back to text commands if not set)
+# Timing — use demo values below for testing, revert to production values before go-live
+REMINDER_MINUTES_BEFORE=2          # Demo: 2 min | Production: 120
+CONSULTATION_TIMEOUT_MINUTES=2     # Demo: 2 min | Production: 30
+
+# Jameel scribe API — leave empty to run locally, set URL when deployed separately
+JAMEEL_SCRIBE_URL=
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Public URL — written automatically by dev_start.py, or set manually
+PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app
+
+# WhatsApp button templates (optional — text fallback used if not set)
 APPOINTMENT_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SOAP_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# Slot candidates for local calendar (comma-separated times)
-APPOINTMENT_SLOT_CANDIDATES=10:30 AM,11:00 AM,5:00 PM,5:30 PM
-
-# Storage directories
-LAB_PDF_DIR=generated/lab_pdfs
-SCRIBE_PDF_DIR=generated/scribe_pdfs
-```
-
-`PUBLIC_BASE_URL` is required for Twilio to fetch generated PDFs as WhatsApp media attachments.
-
-## Development Startup
-
-`dev_start.py` handles the full local dev setup in one command:
-
-```powershell
-python dev_start.py
-```
-
-What it does:
-1. Starts an ngrok HTTPS tunnel on port 8000.
-2. Polls the ngrok local API and reads the public URL.
-3. Writes `PUBLIC_BASE_URL=<ngrok_url>` to `.env` automatically.
-4. Prints the Twilio webhook URL to paste in the Twilio Console.
-5. Starts uvicorn with `--reload`.
-6. Shuts down ngrok cleanly on Ctrl+C.
-
-Ngrok must be installed and authenticated first:
-
-```powershell
-ngrok config add-authtoken YOUR_TOKEN
-```
-
-Free token available at https://dashboard.ngrok.com.
-
-After starting, paste the printed URL into the Twilio WhatsApp Sandbox settings:
-
-```
-https://<ngrok-id>.ngrok-free.app/webhook/twilio
-```
-
-> Every ngrok restart gives a new URL — update Twilio each time.
-
-## Run (production / no ngrok)
-
-```powershell
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Swagger docs: `http://localhost:8000/docs`
-
-## Main Endpoints
-
-```text
-GET  /                              Health and feature summary
-GET  /docs                          Swagger UI
-GET  /graph/nodes                   Registered graph nodes
-POST /classify                      Classify a patient message
-POST /webhook/twilio                Twilio WhatsApp webhook
-POST /parser/parse-report           Upload and parse a lab report PDF
-GET  /parser/health                 Parser health check
-GET  /debug/sessions                Active booking sessions
-GET  /debug/appointments            Confirmed appointments
-GET  /debug/identity                Configured doctor numbers
-GET  /debug/pending-approvals       Pending doctor approvals
-GET  /debug/doctors                 Saved doctor profiles
-GET  /lab-report/pdf/{document_id}  Serve a stored lab report PDF
-GET  /scribe/pdf/{document_id}      Serve a stored SOAP note PDF
-```
-
-The `/lab-report/pdf/` and `/scribe/pdf/` endpoints are hidden from Swagger and used as Twilio media URLs.
-
-## WhatsApp Flows
-
-### Patient — New Chat Greeting
-
-When a patient sends their first message (no active booking session), they receive:
-
-```
-Namaste! Welcome to ClinicAI 🙏
-
-I'm your virtual receptionist. Here's how I can help you:
-
-📅 Book a doctor's appointment
-📋 Share your lab report for the doctor to review
-
-How may I assist you today?
-(You can reply in Hindi or English)
-```
-
-### Patient — Appointment Booking
-
-1. Patient messages the clinic (any first message starts the flow).
-2. Classifier extracts intent and entities.
-3. Booking graph collects patient name, date, time, preferred doctor, and symptoms.
-4. Patient confirms the proposed slot.
-5. System checks Google Calendar or local schedule for conflicts.
-6. Doctor receives an approval request via WhatsApp (button message if `APPOINTMENT_APPROVAL_CONTENT_SID` is set, text otherwise).
-7. Doctor taps **Approve** or **Reject** on the button, or replies `YES APTxxxxx` / `NO APTxxxxx`.
-8. On approval: appointment saved, optional Google Calendar event created, reminder scheduled, patient notified.
-9. On rejection: patient is asked for a different time.
-
-### Patient — Lab Report Upload
-
-1. Patient sends a PDF to the clinic WhatsApp number.
-2. Bot checks the patient has a confirmed or pending appointment — if not, patient is asked to book first.
-3. PDF is downloaded, safety-checked (LLM verifies it is a medical document).
-4. Lab report parser extracts demographics, test values, abnormal/critical flags, and generates a doctor summary.
-5. Text summary + original PDF are forwarded to the patient's doctor.
-6. Patient receives a brief acknowledgment, with a critical-values warning if applicable.
-
-### Doctor — New Chat Greeting
-
-When a doctor sends `hi`, `hello`, `start`, or an empty message, they receive:
-
-```
-Hello Dr. Nabil! 👋
-
-Welcome to ClinicAI. Here's what you can do:
-
-🎙️ Voice note → Send an audio recording and I'll generate a SOAP note PDF for your patient
-✅ Appointments → Approve or suggest an alternate time for pending patient bookings
-
-How can I help you today?
-```
-
-### Doctor — Voice Note → SOAP Note PDF
-
-1. Doctor sends a WhatsApp voice note (with optional caption: `Patient: +91XXXXXXXXXX`).
-2. Audio is downloaded and transcribed by Groq Whisper.
-3. Scribe pipeline generates a structured SOAP note and runs a grounding check.
-4. A PDF is created and stored under `generated/scribe_pdfs/`.
-5. Doctor receives the PDF with Approve/Reject buttons (or text prompt if no template configured).
-6. Doctor taps **Approve** (or replies `APPROVE SOAPxxxxxx`) → PDF delivered to patient via WhatsApp.
-7. Doctor taps **Reject** (or replies `REJECT SOAPxxxxxx`) → note discarded.
-
-If the patient cannot be identified automatically, the doctor is prompted to include the patient's WhatsApp number:
-
-```
-APPROVE SOAPxxxxxx +91XXXXXXXXXX
-```
-
-### Doctor — Text Commands
-
-```text
-hi / hello / start    Welcome greeting with feature overview
-help                  Commands list
-today                 Today's confirmed appointments
-pending / inbox       Pending appointment approval requests
-setup doctor          Doctor profile setup flow
-profile               View saved doctor profile
-YES APTxxxxx          Approve appointment (text fallback)
-NO APTxxxxx           Reject appointment (text fallback)
-APPROVE SOAPxxxxx     Approve SOAP note (text fallback)
-REJECT SOAPxxxxx      Reject SOAP note (text fallback)
-```
-
-## WhatsApp Button Templates
-
-Two Twilio Content Templates are needed for the button feature. Create them in the [Twilio Content Template Builder](https://console.twilio.com).
-
-### Appointment Approval Template
-
-| Field | Value |
-|---|---|
-| Name | `appointment_approval` |
-| Type | Quick Reply |
-| Body | `Appointment request {{1}}`<br>`(newline)`<br>`Patient: {{2}}`<br>`Doctor: {{3}}`<br>`Date: {{4}}`<br>`Time: {{5}}`<br>`Reason: {{6}}` |
-| Button 1 | Title: `Approve` · ID: `apt_approve` |
-| Button 2 | Title: `Reject` · ID: `apt_reject` |
-
-Add to `.env`:
-```env
-APPOINTMENT_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### SOAP Note Approval Template
-
-| Field | Value |
-|---|---|
-| Name | `soap_approval` |
-| Type | Quick Reply |
-| Body | `📋 SOAP note ready for {{1}}.`<br>`(newline)`<br>`Patient: {{2}}`<br>`(newline)`<br>`Review the attached PDF and use the buttons below.` |
-| Button 1 | Title: `Approve` · ID: `soap_approve` |
-| Button 2 | Title: `Reject` · ID: `soap_reject` |
-
-Add to `.env`:
-```env
-SOAP_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-> Use actual line breaks (Enter key) in the body field — do not type `\n` literally.
->
-> Both content SIDs are optional. If not set, the bot falls back to text-based approval commands automatically.
-
-## Google Calendar Setup
-
-```env
-GOOGLE_CALENDAR_ENABLED=true
+# Google Calendar (optional)
+GOOGLE_CALENDAR_ENABLED=False
 GOOGLE_CALENDAR_CREDENTIALS_FILE=google_credentials.json
 GOOGLE_CALENDAR_TOKEN_FILE=google_token.json
 GOOGLE_CALENDAR_ID=primary
 GOOGLE_CALENDAR_TIMEZONE=Asia/Kolkata
 APPOINTMENT_DURATION_MINUTES=30
-APPOINTMENT_SLOT_INTERVAL_MINUTES=30
 ```
 
-Download OAuth client credentials from Google Cloud Console as `google_credentials.json`, then run:
+### 4. Start the server
 
 ```powershell
-python scripts/google_calendar_auth.py
+python dev_start.py
 ```
 
-This creates `google_token.json` used for free/busy checks and event creation. If Calendar is disabled or the check fails, the system falls back to the local in-memory schedule.
+This starts ngrok, writes `PUBLIC_BASE_URL` to `.env` automatically, prints the Twilio webhook URL, then starts uvicorn with `--reload`.
 
-## Notes
+Paste the printed URL into the [Twilio WhatsApp Sandbox](https://console.twilio.com) webhook field:
 
-- All stores (sessions, appointments, approvals, SOAP pending list) are in-memory and reset on server restart. Use a real database for production.
-- If Twilio credentials are missing, all message sending falls back to mock console output for development.
-- `PUBLIC_BASE_URL` must be a reachable public URL — local `localhost` will not work with Twilio media.
-- If a doctor has multiple pending appointment approvals, button taps ask them to specify the request ID via text. Single pending approvals are handled by buttons directly.
-- Generated PDFs are excluded from Git via `generated/` in `.gitignore`.
+```
+https://<ngrok-id>.ngrok-free.app/webhook/twilio
+```
+
+> Every ngrok restart gives a new URL — update Twilio each time, or use a paid ngrok static domain.
+
+---
+
+## API Endpoints
+
+```
+GET  /                              Health check + feature flags
+GET  /docs                          Swagger UI
+GET  /graph/nodes                   Registered graph nodes (debug)
+POST /classify                      Classify a message directly (no WhatsApp needed)
+POST /webhook/twilio                Twilio WhatsApp webhook (all messages flow here)
+POST /scribe/consult                Jameel scribe API — consultation bundle → SOAP result
+GET  /debug/sessions                All active BookingSession objects
+GET  /debug/appointments            All confirmed AppointmentRecord objects
+GET  /debug/identity                Configured doctor phone numbers
+GET  /debug/pending-approvals       Pending doctor appointment approvals
+GET  /debug/doctors                 Saved doctor profiles
+GET  /debug/consultations           All active/recent ConsultationSession objects
+GET  /scribe/pdf/{id}               Serve a SOAP note PDF
+GET  /lab-report/pdf/{id}           Serve a lab report PDF
+```
+
+---
+
+## Testing the Pipeline
+
+The steps below walk through every feature end-to-end. Use two real phones: one as the **patient** (any WhatsApp number joined to the Twilio sandbox), one as the **doctor** (the number in `DOCTOR_WHATSAPP_NUMBERS`).
+
+### Prerequisites
+
+Before starting any test:
+
+1. Server is running (`python dev_start.py` or `uvicorn main:app --reload`)
+2. ngrok tunnel is live and Twilio webhook is updated
+3. Redis is running (`docker ps` or check `GET /` → `"scheduler": true`)
+4. Patient phone has joined the Twilio sandbox: send `join <your-sandbox-keyword>` to `+14155238886`
+5. Confirm server is healthy: `GET http://localhost:8000/` should return `"status": "ok"`
+
+---
+
+### Test 1 — Intent Classifier (no WhatsApp needed)
+
+Verify the classifier works before testing the full flow.
+
+```powershell
+curl -X POST http://localhost:8000/classify `
+  -H "Content-Type: application/json" `
+  -d '{"from_number": "+919876543210", "message": "I want to book an appointment with Dr Jameel tomorrow at 10am"}'
+```
+
+**Expected:** `intent: "appointment_book"`, `confidence > 0.85`, `entities.doctor_name: "Dr Jameel"`, `entities.requested_date: "tomorrow"`, `entities.requested_time: "10am"`
+
+Test emergency:
+```powershell
+curl -X POST http://localhost:8000/classify `
+  -H "Content-Type: application/json" `
+  -d '{"from_number": "+919876543210", "message": "mujhe bahut takleef hai emergency hai"}'
+```
+
+**Expected:** `intent: "emergency"`, `confidence > 0.9`
+
+---
+
+### Test 2 — Appointment Booking (full multi-turn flow)
+
+**From the patient phone:**
+
+1. Send: `hi` → expect welcome greeting
+2. Send: `I want to book an appointment with Dr Jameel` → bot asks for name
+3. Send your name (e.g. `Rahul Sharma`) → bot asks for date
+4. Send: `tomorrow` → bot asks for time
+5. Send: `10am` → bot asks for symptoms
+6. Send: `I have a fever and headache` → bot shows confirmation slot
+7. Send: `yes confirm` → bot says "Waiting for doctor approval"
+
+**Verify session state:**
+```
+GET http://localhost:8000/debug/sessions
+```
+Look for your patient number. `state` should be `WAITING_DOCTOR_APPROVAL`.
+
+**From the doctor phone:**
+
+8. You receive a WhatsApp message with appointment details + Approve/Reject buttons (or text `YES APTxxxxx`)
+9. Tap **Approve** (or reply `YES APT<id>`)
+
+**Expected on patient phone:** "Your appointment has been confirmed with Dr Jameel on tomorrow at 10:00 AM."
+
+**Verify appointment saved:**
+```
+GET http://localhost:8000/debug/appointments
+```
+
+---
+
+### Test 3 — Appointment Reminder
+
+With `REMINDER_MINUTES_BEFORE=2`, the reminder fires 2 minutes before the appointment time.
+
+1. Book an appointment for a time that is 3–5 minutes from now (e.g. if it's 14:00, book for 14:05).
+2. Doctor approves.
+3. Wait approximately `appointment_time - 2 minutes`.
+
+**Expected on patient phone:** "⏰ Reminder — ClinicAI. Your appointment with Dr Jameel is in 2 minutes!"
+
+> If the appointment time is less than 2 minutes away when approved, the reminder fires in 30 seconds.
+
+---
+
+### Test 4 — Appointment Cancellation and Rescheduling
+
+**Cancel:**
+
+From the patient phone: `I want to cancel my appointment`
+
+**Expected:** Bot confirms cancellation and asks if you need a new slot.
+
+**Reschedule:**
+
+From the patient phone: `reschedule my appointment to day after tomorrow at 3pm`
+
+**Expected:** Bot collects new slot → sends to doctor for approval again.
+
+---
+
+### Test 5 — Emergency Flow
+
+From the patient phone:
+
+Send: `emergency mujhe bahut takleef ho rahi hai` (or any emergency message)
+
+**Expected on patient phone:** Immediate response with emergency instructions and "Call 112".
+
+**Expected on doctor phone:** WhatsApp alert — "🚨 EMERGENCY ALERT — Patient +91... sent an emergency message. Please respond immediately or call 112."
+
+---
+
+### Test 6 — After-Hours Message
+
+1. Temporarily change `.env`: `CLINIC_CLOSE_HOUR=0` (makes the clinic always closed) and restart the server.
+2. From the patient phone: send any message.
+
+**Expected:** "ClinicAI is closed right now (9 AM – 8 PM IST). Your message has been received and we'll respond first thing when we open."
+
+**Verify message was queued:**
+```
+GET http://localhost:8000/debug/sessions
+```
+(The message is in Redis under `clinicai:afterhours:{doctor_number}`)
+
+3. Restore `CLINIC_CLOSE_HOUR=20` and restart. The after-hours flush job will re-process the queued message at the next `CLINIC_OPEN_HOUR:00`.
+
+---
+
+### Test 7 — Lab Report Upload
+
+1. First complete a booking (Test 2) so the patient has a confirmed appointment.
+2. From the patient phone: send a PDF lab report as a WhatsApp attachment.
+
+**Expected on patient phone:** "Lab report received. I've forwarded it to your doctor for review."
+
+**Expected on doctor phone:** Lab report summary + original PDF forwarded.
+
+**Verify:**
+```
+GET http://localhost:8000/debug/pending-approvals
+```
+
+---
+
+### Test 8 — Doctor Voice Note → Single SOAP Note (outside consultation)
+
+This tests the standalone scribe pipeline (not inside a consultation).
+
+1. From the **doctor phone**: send a WhatsApp voice note (no active consultation for any patient).
+2. Speak a sample clinical note, e.g.: *"Patient is Suresh, 45 years old. BP is 140 over 90. Starting Amlodipine 5mg once daily. Follow-up in two weeks."*
+
+**Expected on doctor phone:**
+- PDF attachment with the SOAP note for review
+- Approve / Reject buttons (or text `APPROVE RXxxxxxx` / `REJECT RXxxxxxx`)
+
+3. Tap **Approve**.
+
+**Expected on patient phone:** PDF delivered (if patient number was identifiable from caption or recent appointment).
+
+> To specify the patient explicitly, send the voice note with caption: `Patient: +91XXXXXXXXXX`
+
+---
+
+### Test 9 — Consultation Lifecycle (Sprint 2 core feature)
+
+This is the main Sprint 2 flow. Set `CONSULTATION_TIMEOUT_MINUTES=2` in `.env` for testing.
+
+#### 9a — Start consultation
+
+**From the patient phone:**
+
+Send: `doctor mujhe sir dard ho raha hai aur bukhar bhi hai`
+
+**Expected on patient phone:** "Message received — consultation in progress. 🩺 The doctor will respond shortly."
+
+**Verify consultation session created:**
+```
+GET http://localhost:8000/debug/consultations
+```
+Look for your patient number. You should see:
+- `is_active: true`
+- `messages: [{sender_role: "patient", text: "doctor mujhe..."}]`
+- `journey_state` on the booking session should be `CONSULTATION_ACTIVE` (check `/debug/sessions`)
+
+#### 9b — Doctor sends voice note during consultation
+
+**From the doctor phone:** Send a WhatsApp voice note.
+
+Speak something like: *"Patient has headache and fever since two days. Temperature 101 degrees. Prescribing Paracetamol 500mg three times daily for three days. Review if fever persists."*
+
+**Expected on doctor phone:** "🎙️ Voice note received and added to the active consultation buffer. Send *ok done* or *take care* when the consultation is complete."
+
+**Verify audio was buffered** (not processed as standalone SOAP):
+```
+GET http://localhost:8000/debug/consultations
+```
+Check `audio_files` array — it should now contain the audio URL.
+
+**Patient can also send more messages:**
+
+From the patient phone: `kal se chal raha hai aur neend nahi aayi`
+
+Check `/debug/consultations` → `messages` array now has 2 patient messages + 1 doctor audio.
+
+#### 9c — End consultation via closing phrase
+
+**From the patient phone:** Send `ok done` (or `take care`, `bas`, `done`, `bye`)
+
+**Expected on patient phone:** "Your consultation has been recorded. The doctor will send any prescriptions or follow-up instructions shortly. 🙏"
+
+**Expected on doctor phone (within ~60 seconds):**
+- WhatsApp message with consultation summary:
+  ```
+  📋 ClinicAI — Consultation Summary
+  Patient: +91...
+  Messages: 3 | Audio files: 1
+  Ended: closing_phrase
+
+  Dx: Fever and headache
+  Rx: Paracetamol 500mg TDS...
+
+  Follow-up questions to ask patient:
+    1. How are you feeling today? Has the fever reduced?
+    2. Have you been taking the medication as prescribed?
+  ```
+- PDF link: `GET /scribe/pdf/{id}` — opens the full SOAP note PDF
+
+**Verify consultation was cleaned up:**
+```
+GET http://localhost:8000/debug/consultations
+```
+Should be empty or the session's `is_active` should be `false`.
+
+**Verify journey state updated:**
+```
+GET http://localhost:8000/debug/sessions
+```
+Patient's `journey_state` should now be `POST_CONSULT`.
+
+#### 9d — End consultation via inactivity timeout
+
+Repeat steps 9a–9b but do NOT send a closing phrase. Wait `CONSULTATION_TIMEOUT_MINUTES` (2 minutes in demo).
+
+**Expected:** After 2 minutes of silence, the server automatically calls `finalize_and_send()` and the doctor receives the summary — same as the closing phrase path.
+
+Server logs will show:
+```
+[Consultation] Timeout fired for +91... — finalising
+[ConsultationService] Summary sent to doctor +919801581020
+[ConsultationService] ConsultationSession deleted for +91...
+```
+
+---
+
+### Test 10 — Scribe API Directly (Jameel-side endpoint)
+
+Test `POST /scribe/consult` directly without going through the WhatsApp flow.
+
+```powershell
+curl -X POST http://localhost:8000/scribe/consult `
+  -H "Content-Type: application/json" `
+  -d '{
+    "patient_id": "+919876543210",
+    "doctor_id": "+919801581020",
+    "messages": [
+      {"sender_role": "patient", "text": "doctor mujhe sir dard ho raha hai", "audio_url": null, "timestamp": "2026-05-27T10:00:00"},
+      {"sender_role": "doctor",  "text": "Patient has mild headache since morning. Prescribing Paracetamol 500mg OD.", "audio_url": null, "timestamp": "2026-05-27T10:02:00"}
+    ],
+    "audio_files": []
+  }'
+```
+
+**Expected response:**
+```json
+{
+  "soap_note_pdf_url": "https://...ngrok.../scribe/pdf/...",
+  "follow_up_questions": ["How are you feeling today?", "..."],
+  "missing_sections": [],
+  "summary_for_whatsapp": "Dx: Mild headache | Rx: Paracetamol 500mg OD"
+}
+```
+
+Open the `soap_note_pdf_url` in a browser to verify the PDF was generated correctly.
+
+---
+
+### Test 11 — Follow-Up Query (post-consultation)
+
+After completing Test 9, the patient's `journey_state` is `POST_CONSULT`.
+
+From the patient phone: `doctor ne jo follow up questions pooche the, kya hain woh?`
+
+**Expected:** Bot responds with context-appropriate follow-up messaging (acknowledges POST_CONSULT state).
+
+---
+
+### Test 12 — No-Show Recovery
+
+1. Book an appointment for a time 2 minutes from now.
+2. Doctor approves.
+3. Do NOT send any message from the patient phone after the appointment time.
+4. Wait `appointment_time + 1 hour` (or set a past appointment time in the booking for faster testing).
+
+**Expected on patient phone (at +1hr):** "👋 Hi! We noticed you may have missed your appointment today. Reply *reschedule* to book a new slot."
+
+**Expected at +24hr:** Second follow-up message with reschedule prompt.
+
+> The no-show check is skipped if `last_active` timestamp is newer than the appointment time — i.e. if the patient sent any message after the appointment.
+
+---
+
+### Test 13 — Doctor Onboarding
+
+From the **doctor phone**: send `setup doctor`
+
+Follow the 5-step flow:
+1. Name
+2. Google email (for calendar — enter any value if calendar is disabled)
+3. Working hours (e.g. `9am to 8pm`)
+4. Appointment duration (e.g. `30`)
+5. Buffer time (e.g. `5`)
+
+**Verify profile saved:**
+```
+GET http://localhost:8000/debug/doctors
+```
+
+---
+
+### Quick Debug Checklist
+
+At any point during testing, use these endpoints to inspect current state:
+
+| Endpoint | What to check |
+|---|---|
+| `GET /` | All feature flags are `true` (classifier, whatsapp_webhook, booking_graph, scheduler) |
+| `GET /debug/sessions` | Patient's `state` and `journey_state` |
+| `GET /debug/appointments` | Confirmed appointment records |
+| `GET /debug/pending-approvals` | Approvals with `status: "waiting_doctor"` |
+| `GET /debug/consultations` | Active session, message buffer, audio_files |
+| `GET /debug/doctors` | Doctor profile after onboarding |
+| `GET /graph/nodes` | Verify all graph nodes are registered |
+
+**Server logs** (uvicorn console) show the full pipeline trace for every message:
+
+```
+[Webhook] From: +919876543210 | Role: patient | Message: hi
+[Graph] Pipeline: router/intent_node -> router/session_node -> booking_dispatch_node
+[Graph] Reply: Namaste! Welcome to ClinicAI...
+```
+
+---
+
+## WhatsApp Flows Reference
+
+### Patient
+
+| Message | Intent | Agent dispatched |
+|---|---|---|
+| `hi / hello / book appointment` | `appointment_book` | BookingAgent |
+| `cancel my appointment` | `appointment_cancel` | BookingAgent |
+| `reschedule to tomorrow 3pm` | `appointment_reschedule` | BookingAgent |
+| `what is the status of my booking` | `appointment_status` | BookingAgent |
+| `doctor mujhe bukhar hai` (during consult) | `consultation_message` | ConsultationAgent |
+| `ok done / take care / bas` (during consult) | `consultation_message` | ConsultationAgent → finalize |
+| Send PDF | lab report | `pdf_service` (bypasses router) |
+| `emergency mujhe takleef hai` | `emergency` | EmergencyAgent |
+| Any message outside 9am–8pm IST | — | AfterHoursAgent |
+| `doctor ne kya bola tha` (after consult) | `followup_query` | FollowUpAgent |
+
+### Doctor
+
+| Message / Action | What happens |
+|---|---|
+| Tap **Approve** button | `appointment_approval.handle_appointment_button_reply()` |
+| Tap **Reject** button | Appointment rejected, patient asked for new slot |
+| `YES APTxxxxx` | Text-based appointment approval |
+| `NO APTxxxxx` | Text-based appointment rejection |
+| Send voice note (no active consultation) | Standalone scribe pipeline → SOAP PDF → approval buttons |
+| Send voice note (during active consultation) | Audio buffered into ConsultationSession |
+| Tap **Approve** (SOAP) | `soap_approval` → PDF sent to patient |
+| `APPROVE RXxxxxxx` | Text-based SOAP approval |
+| `REJECT RXxxxxxx` | SOAP discarded |
+| `OK LABxxxxxx` | Lab review acknowledged |
+| `today` | Today's confirmed appointments |
+| `pending` / `inbox` | Pending approval requests |
+| `setup doctor` | 5-step onboarding flow |
+| `hi` / `hello` | Doctor welcome greeting |
+
+---
+
+## WhatsApp Button Templates
+
+Two Twilio Content Templates are required for interactive approval buttons. Create them at [console.twilio.com/content-template-builder](https://console.twilio.com).
+
+### Appointment Approval
+
+| Field | Value |
+|---|---|
+| Type | Quick Reply |
+| Body | `Appointment request from {{1}}\nPatient: {{2}}\nDate: {{3}}\nTime: {{4}}\nReason: {{5}}` |
+| Button 1 | Label: `Approve` · ID: `apt_approve` |
+| Button 2 | Label: `Reject` · ID: `apt_reject` |
+
+```env
+APPOINTMENT_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### SOAP Note Approval
+
+| Field | Value |
+|---|---|
+| Type | Quick Reply |
+| Body | `📋 SOAP note ready for {{1}}.\nPatient: {{2}}\nReview the PDF and approve or reject.` |
+| Button 1 | Label: `Approve` · ID: `soap_approve` |
+| Button 2 | Label: `Reject` · ID: `soap_reject` |
+
+```env
+SOAP_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+> Both are optional — text fallback commands work automatically if not configured.
+
+---
+
+## Production Notes
+
+- **Revert demo timing values** before go-live: `REMINDER_MINUTES_BEFORE=120`, `CONSULTATION_TIMEOUT_MINUTES=30`
+- **LangGraph MemorySaver** is in-process only — a server restart loses thread checkpoints. Replace with `RedisSaver` for production.
+- **Debug endpoints** (`/debug/*`) are unauthenticated — remove or gate behind auth before exposing publicly.
+- **`.env` must not be committed** — it contains live API keys.
+- **`PUBLIC_BASE_URL`** must be a stable reachable URL in production — not ngrok.
+- **Twilio webhook signature validation** is not implemented — add `RequestValidator` before production deployment.

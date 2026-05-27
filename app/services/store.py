@@ -28,7 +28,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from app.schemas import AppointmentRecord, BookingSession
+from app.schemas import AppointmentRecord, BookingSession, ConsultationMessage, ConsultationSession
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -40,6 +40,8 @@ _TTL_GREETED = 2_592_000     # 30 days
 _TTL_SLOTS = 86_400          # 24 h
 _TTL_PENDING = 604_800       # 7 days
 _TTL_LAST_ACTIVE = 604_800   # 7 days
+_TTL_CONSULTATION = 14_400   # 4 h
+_TTL_AFTERHOURS = 129_600    # 36 h
 
 
 # ── Redis connection ───────────────────────────────────────────────────────────
@@ -139,6 +141,8 @@ _doctor_setup_sessions: dict[str, dict] = {}
 _slot_suggestions: dict[str, list[dict]] = {}
 _pending_soaps: dict[str, dict] = {}
 _pending_lab_reviews: dict[str, dict] = {}
+_consultations: dict[str, ConsultationSession] = {}
+_after_hours_queues: dict[str, list[dict]] = {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -550,6 +554,80 @@ def get_last_active(phone: str) -> Optional[datetime]:
         except Exception:
             pass
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONSULTATION SESSIONS  (Sprint 2)
+# Key: clinicai:consult:{patient_number}   TTL 4h
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_consultation(patient_number: str, session: ConsultationSession) -> None:
+    session.last_activity = datetime.now()
+    _rset(_key(f"consult:{patient_number}"), session.model_dump(), _TTL_CONSULTATION)
+    _consultations[patient_number] = session
+
+
+def get_consultation(patient_number: str) -> Optional[ConsultationSession]:
+    data = _rget(_key(f"consult:{patient_number}"))
+    if data:
+        return ConsultationSession.model_validate(data)
+    return _consultations.get(patient_number)
+
+
+def delete_consultation(patient_number: str) -> None:
+    _rdel(_key(f"consult:{patient_number}"))
+    _consultations.pop(patient_number, None)
+
+
+def append_consultation_message(patient_number: str, msg: ConsultationMessage) -> None:
+    session = get_consultation(patient_number)
+    if session:
+        session.messages.append(msg)
+        save_consultation(patient_number, session)
+
+
+def all_consultations() -> dict:
+    if _r is not None:
+        result = {}
+        try:
+            for key in _r.scan_iter(f"{_PREFIX}consult:*"):
+                phone = key.removeprefix(f"{_PREFIX}consult:")
+                data = _rget(key)
+                if data:
+                    result[phone] = data
+            return result
+        except Exception:
+            pass
+    return {k: v.model_dump() for k, v in _consultations.items()}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AFTER-HOURS QUEUE  (Sprint 2)
+# Key: clinicai:afterhours:{doctor_number}   TTL 36h  (JSON list)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def queue_after_hours_message(doctor_number: str, from_number: str, body: str) -> None:
+    entry = {
+        "from_number": from_number,
+        "body": body,
+        "queued_at": datetime.now().isoformat(),
+    }
+    existing = get_after_hours_queue(doctor_number)
+    existing.append(entry)
+    _rset(_key(f"afterhours:{doctor_number}"), existing, _TTL_AFTERHOURS)
+    _after_hours_queues.setdefault(doctor_number, []).append(entry)
+
+
+def get_after_hours_queue(doctor_number: str) -> list[dict]:
+    data = _rget(_key(f"afterhours:{doctor_number}"))
+    if data and isinstance(data, list):
+        return data
+    return list(_after_hours_queues.get(doctor_number, []))
+
+
+def clear_after_hours_queue(doctor_number: str) -> None:
+    _rdel(_key(f"afterhours:{doctor_number}"))
+    _after_hours_queues.pop(doctor_number, None)
 
 
 # ── Internal helper ────────────────────────────────────────────────────────────

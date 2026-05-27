@@ -8,7 +8,8 @@ from app.graph.classifier import (
     postprocess_node,
     error_node,
 )
-from app.graph.booking import build_booking_graph, booking_graph
+from app.graph.router import router_graph
+from app.graph.booking import booking_graph  # backward-compat shim → router_graph
 
 __all__ = [
     "build_classifier_graph",
@@ -19,6 +20,6 @@ __all__ = [
     "fallback_node",
     "postprocess_node",
     "error_node",
-    "build_booking_graph",
+    "router_graph",
     "booking_graph",
 ]

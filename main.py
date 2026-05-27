@@ -28,6 +28,7 @@ if classifier_graph is None:
 
 webhook_router = _optional_attr("app.api.webhook_router", "router")
 parser_router = _optional_attr("app.api.parser_router", "router")
+scribe_router = _optional_attr("app.api.scribe_router", "router")
 booking_graph = _optional_attr("app.graph.booking", "booking_graph")
 scheduler = _optional_attr("app.services.scheduler", "scheduler")
 
@@ -41,21 +42,31 @@ def _graph_nodes(graph: Any | None) -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("=" * 60)
-    print("  ClinicAI - Complete System")
+    print("  ClinicAI - Sprint 2 Multi-Agent System")
     print("=" * 60)
 
     if scheduler is not None:
         if not getattr(scheduler, "running", False):
             scheduler.start()
-        print("  APScheduler ready - reminder jobs available")
+        print("  APScheduler ready — reminder + consultation timeout + after-hours flush jobs available")
+
+        # Register after-hours flush for all configured doctors
+        try:
+            from app.services.identity import all_doctor_numbers
+            from app.services.scheduler import schedule_afterhours_flush
+            for doc_num in all_doctor_numbers():
+                schedule_afterhours_flush(doc_num)
+        except Exception as _exc:
+            print(f"  [WARN] After-hours flush registration failed: {_exc}")
     else:
-        print("  APScheduler not configured -  scheduler module not found")
+        print("  APScheduler not configured — scheduler module not found")
 
     print(f"  Classifier graph nodes: {_graph_nodes(classifier_graph)}")
     if booking_graph is not None:
-        print(f"  Booking graph nodes   : {_graph_nodes(booking_graph)}")
+        print(f"  Router graph nodes    : {_graph_nodes(booking_graph)}")
     else:
-        print("  Booking graph nodes   : not configured")
+        print("  Router graph          : not configured")
+    print("  Agents: BookingAgent | ConsultationAgent | EmergencyAgent | AfterHoursAgent | LabAgent | FollowUpAgent")
     print("=" * 60)
 
     yield
@@ -91,6 +102,9 @@ if webhook_router is not None:
 
 if parser_router is not None:
     app.include_router(parser_router)
+
+if scribe_router is not None:
+    app.include_router(scribe_router)
 
 
 @app.get("/", tags=["Health"])

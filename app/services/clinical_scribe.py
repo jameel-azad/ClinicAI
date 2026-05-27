@@ -43,6 +43,15 @@ async def handle_doctor_voice_note(
     if not _is_supported_audio(media_content_type):
         return "I received media from the doctor, but it was not a supported audio voice note."
 
+    # ── Consultation buffer pre-check ──────────────────────────────────────────
+    # If an active consultation exists for any patient linked to this doctor,
+    # buffer the audio URL in the consultation session instead of running the
+    # local scribe pipeline immediately. Jameel's API receives it on finalize.
+    buffered_reply = _try_buffer_doctor_audio(media_url, doctor_number)
+    if buffered_reply:
+        return buffered_reply
+    # ── End consultation buffer pre-check ──────────────────────────────────────
+
     audio_path = None
     try:
         audio_path = await _download_audio(media_url, media_content_type)
@@ -248,6 +257,54 @@ def _public_pdf_url(document_id: str) -> str | None:
     if not base_url:
         return None
     return f"{base_url}/scribe/pdf/{document_id}"
+
+
+def _try_buffer_doctor_audio(media_url: str, doctor_number: str) -> str | None:
+    """
+    If any patient has an active ConsultationSession linked to this doctor,
+    buffer the audio URL there and return an ack string.
+    Returns None if no active consultation — caller should run local scribe.
+    """
+    try:
+        from app.services.store import get_consultation, save_consultation
+        from app.services.identity import all_doctor_numbers, find_doctor_name
+        from app.schemas import ConsultationMessage
+        import redis as _redis_lib
+        import os as _os
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+
+        r_url = _os.getenv("REDIS_URL", "redis://localhost:6379")
+        r = _redis_lib.Redis.from_url(r_url, decode_responses=True, socket_connect_timeout=2)
+        r.ping()
+
+        prefix = "clinicai:consult:"
+        for key in r.scan_iter(f"{prefix}*"):
+            patient_number = key.removeprefix(prefix)
+            session = get_consultation(patient_number)
+            if not session or not session.is_active:
+                continue
+            if session.doctor_number != doctor_number:
+                continue
+
+            now = _dt.now(_ZI(_os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata")))
+            msg = ConsultationMessage(
+                sender_role="doctor",
+                audio_url=media_url,
+                timestamp=now,
+            )
+            session.messages.append(msg)
+            session.audio_files.append({"url": media_url, "duration_secs": None})
+            save_consultation(patient_number, session)
+
+            print(f"[Scribe] Buffered doctor audio in consultation {session.consultation_id}")
+            return (
+                "🎙️ Voice note received and added to the active consultation buffer.\n"
+                "Send *ok done* or *take care* when the consultation is complete."
+            )
+    except Exception as exc:
+        print(f"[Scribe] _try_buffer_doctor_audio: {exc}")
+    return None
 
 
 def _is_supported_audio(media_content_type: str | None) -> bool:

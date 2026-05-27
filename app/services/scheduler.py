@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 load_dotenv()
 
 REMINDER_MINUTES = int(os.getenv("REMINDER_MINUTES_BEFORE", "120"))  # 2 hours default
+_DEMO_REMINDER_DELAY = os.getenv("DEMO_REMINDER_DELAY_MINUTES", "").strip()  # e.g. "2" for demo
 CONSULTATION_TIMEOUT_MINUTES = int(os.getenv("CONSULTATION_TIMEOUT_MINUTES", "30"))
 _TZ_NAME = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata")
 _CLINIC_OPEN_HOUR = int(os.getenv("CLINIC_OPEN_HOUR", "9"))
@@ -113,18 +114,26 @@ def schedule_reminder(
     date_str: str,
     time_str: str,
 ) -> datetime:
-    appointment_dt = _resolve_appointment_datetime(date_str, time_str)
+    tz = ZoneInfo(_TZ_NAME)
+    now = datetime.now(tz)
 
-    if appointment_dt is None:
-        print(f"[Reminder] Could not parse '{date_str} {time_str}' for {appointment_id} — skipping")
-        return datetime.now()
+    # Demo mode: fire N minutes after approval, ignoring appointment time
+    if _DEMO_REMINDER_DELAY:
+        delay_mins = int(_DEMO_REMINDER_DELAY)
+        fire_at = now + timedelta(minutes=delay_mins)
+        print(f"[Reminder] DEMO MODE — firing in {delay_mins} min for {appointment_id}")
+    else:
+        appointment_dt = _resolve_appointment_datetime(date_str, time_str)
 
-    now = datetime.now(appointment_dt.tzinfo)
-    fire_at = appointment_dt - timedelta(minutes=REMINDER_MINUTES)
+        if appointment_dt is None:
+            print(f"[Reminder] Could not parse '{date_str} {time_str}' for {appointment_id} — skipping")
+            return now
 
-    # If appointment is too soon (less than REMINDER_MINUTES away), fire in 30s
-    if fire_at <= now:
-        fire_at = now + timedelta(seconds=30)
+        fire_at = appointment_dt - timedelta(minutes=REMINDER_MINUTES)
+
+        # If appointment is too soon (less than REMINDER_MINUTES away), fire in 30s
+        if fire_at <= now:
+            fire_at = now + timedelta(seconds=30)
 
     scheduler.add_job(
         func=_send_reminder_job,

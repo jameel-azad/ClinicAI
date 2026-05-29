@@ -54,17 +54,20 @@ def followup_node(state: BookingState) -> dict:
 
     # ── FOLLOW_UP_PENDING: patient replied to the check-in message ────────────
     if journey_state == "FOLLOW_UP_PENDING":
-        # Forward the patient's reply to the doctor as a summary
+        # Forward the patient's reply to the doctor and save reply context
         try:
             doctor_number = find_doctor_number(raw_doctor) if appt else None
             if doctor_number:
+                from app.services.store import save_doctor_reply_context
                 name_label = f"*{patient_name}*" if patient_name else "your patient"
                 doc_msg = (
-                    f"📋 Follow-up response from {name_label}:\n\n"
+                    f"📋 Follow-up from {name_label}:\n\n"
                     f"{incoming}\n\n"
-                    f"_(Automated follow-up check-in reply)_"
+                    f"_(Just reply here to send back to this patient)_"
                 )
                 send_whatsapp_message_sync(doctor_number, doc_msg)
+                # Save context so the doctor can reply without any command
+                save_doctor_reply_context(doctor_number, from_number, patient_name or "")
         except Exception as exc:
             print(f"[followup_agent] Could not notify doctor: {exc}")
 

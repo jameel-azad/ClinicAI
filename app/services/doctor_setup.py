@@ -12,6 +12,7 @@ from app.services.store import (
 
 SETUP_STEPS = [
     "name",
+    "specialty",
     "google_email",
     "working_hours",
     "duration",
@@ -36,7 +37,7 @@ def handle_doctor_setup_message(
             save_doctor_setup_session(doctor_number, session)
             return f"Doctor setup started.\n\nWhat Google Calendar email should {os.getenv('CLINIC_NAME', 'ClinicAI')} use?"
         save_doctor_setup_session(doctor_number, session)
-        return "Doctor setup started.\n\nWhat is your doctor name? Example: Dr Pawan"
+        return "Doctor setup started.\n\nWpohat is your doctor name? Example: Dr Pawan"
 
     if lower in {"profile", "doctor profile", "my profile"}:
         return _format_profile(get_doctor_profile(doctor_number))
@@ -49,6 +50,16 @@ def handle_doctor_setup_message(
 
     if step == "name":
         profile["name"] = text
+        existing["step"] = "specialty"
+        existing["profile"] = profile
+        save_doctor_setup_session(doctor_number, existing)
+        return (
+            "Got it! What is your medical specialty?\n"
+            "_(e.g. Cardiology, General Medicine, Orthopedics, Diabetology)_"
+        )
+
+    if step == "specialty":
+        profile["specialty"] = text
         existing["step"] = "google_email"
         existing["profile"] = profile
         save_doctor_setup_session(doctor_number, existing)
@@ -106,6 +117,7 @@ def _format_profile(profile: dict | None) -> str:
     return (
         "Doctor profile\n"
         f"Name: {profile.get('name')}\n"
+        f"Specialty: {profile.get('specialty') or 'Not set'}\n"
         f"Google email: {profile.get('google_email')}\n"
         f"Working hours: {profile.get('working_hours')}\n"
         f"Slot duration: {profile.get('appointment_duration_minutes')} minutes\n"

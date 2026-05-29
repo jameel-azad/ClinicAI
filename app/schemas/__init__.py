@@ -153,6 +153,7 @@ class BookingSession(BaseModel):
     requested_time: Optional[str] = None
     doctor_name: Optional[str] = None
     symptoms: Optional[list[str]] = None
+    doctor_shortlist: Optional[list[str]] = None  # ordered names shown in COLLECT_DOCTOR_PREFERENCE
     new_requested_date: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     new_requested_time: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     last_bot_response: Optional[str] = None    # for context-aware classification

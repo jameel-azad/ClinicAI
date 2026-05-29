@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import os
 import shutil
 import tempfile
+import traceback
 import uuid
 from pathlib import Path
 
@@ -61,7 +63,7 @@ async def download_media(media_url: str) -> str:
 
     auth = (account_sid, auth_token) if account_sid and auth_token else None
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(media_url, auth=auth, follow_redirects=True)
         response.raise_for_status()
 
@@ -153,8 +155,8 @@ def format_report_reply(state: dict) -> str:
 async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
     """
     Handle a WhatsApp PDF from a patient:
-    1. Download + safety check + parse
-    2. Forward the full report summary to the doctor
+    1. Download + safety check + parse (pipeline runs in a thread to avoid blocking the event loop)
+    2. Forward the full report summary to the doctor(s)
     3. Return a brief acknowledgment to the patient
     """
     if not lab_report_pipeline:
@@ -164,22 +166,18 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
     try:
         temp_path = await download_media(media_url)
 
-        if not check_safety(temp_path):
+        if not await asyncio.to_thread(check_safety, temp_path):
             return "This document does not appear to be a valid lab report or could not be verified for safety."
 
         print(f"[Parser] Invoking pipeline for {temp_path}")
-        final_state = lab_report_pipeline.invoke({"pdf_path": temp_path})
+        # Run the synchronous LangGraph pipeline in a thread so it doesn't block the event loop
+        final_state = await asyncio.to_thread(
+            lab_report_pipeline.invoke, {"pdf_path": temp_path}
+        )
 
         errors = final_state.get("errors", [])
         if errors and not final_state.get("doctor_summary"):
             return "Sorry, I had trouble reading that report. Please ask the clinic to check it manually."
-
-        # Only forward if the patient has an existing booking
-        if not _find_doctor_for_patient(from_number):
-            return (
-                "We couldn't find an active booking for your number. "
-                "Please book an appointment first, then share your lab report."
-            )
 
         # Store PDF permanently before cleanup so we can share the original with the doctor
         document_id, _ = store_lab_pdf(temp_path)
@@ -187,7 +185,7 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
 
         lab_id = "LAB" + str(uuid.uuid4())[:6].upper()
         doctor_numbers = _find_doctor_for_patient(from_number)
-        _forward_report_to_doctor(final_state, from_number, pdf_url, lab_id=lab_id)
+        _forward_report_to_doctor(final_state, from_number, pdf_url, lab_id=lab_id, doctor_numbers=doctor_numbers)
 
         if doctor_numbers:
             from app.services.store import save_pending_lab_review
@@ -207,7 +205,7 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
         return "Your lab report has been received and forwarded to the doctor for review."
 
     except Exception as e:
-        logger.error(f"Error handling PDF: {e}")
+        logger.error(f"Error handling PDF: {e!r}\n{traceback.format_exc()}")
         return "Sorry, an error occurred while processing the PDF."
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -222,15 +220,19 @@ def _find_doctor_for_patient(from_number: str) -> list[str]:
     from app.services.store import get_appointments_by_number
     from app.services.identity import find_doctor_number, all_doctor_numbers, normalize_whatsapp_number
 
-    if from_number:
-        appointments = get_appointments_by_number(normalize_whatsapp_number(from_number))
-        if appointments:
-            most_recent = max(appointments, key=lambda a: a.confirmed_at)
-            doctor_number = find_doctor_number(most_recent.doctor_name)
-            if doctor_number:
-                return [doctor_number]
+    try:
+        if from_number:
+            appointments = get_appointments_by_number(normalize_whatsapp_number(from_number))
+            if appointments:
+                most_recent = max(appointments, key=lambda a: a.confirmed_at)
+                doctor_number = find_doctor_number(most_recent.doctor_name)
+                if doctor_number:
+                    return [doctor_number]
+    except Exception as exc:
+        logger.warning(f"[pdf_service] Appointment lookup failed: {exc}")
 
-    return []
+    # Fall back to all configured doctor numbers
+    return all_doctor_numbers()
 
 
 def _forward_report_to_doctor(
@@ -238,11 +240,13 @@ def _forward_report_to_doctor(
     from_number: str,
     pdf_url: str | None = None,
     lab_id: str | None = None,
+    doctor_numbers: list[str] | None = None,
 ) -> None:
     """Send the text summary and (if available) the original PDF to the relevant doctor(s)."""
     from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_media_sync
 
-    doctor_numbers = _find_doctor_for_patient(from_number)
+    if doctor_numbers is None:
+        doctor_numbers = _find_doctor_for_patient(from_number)
     if not doctor_numbers:
         logger.warning("[Parser] No doctor numbers configured — report not forwarded")
         return

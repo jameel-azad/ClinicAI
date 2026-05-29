@@ -66,6 +66,16 @@ async def lifespan(app: FastAPI):
                 schedule_weekly_insights(doc_num)
         except Exception as _exc:
             print(f"  [WARN] Weekly insights registration failed: {_exc}")
+
+    # Seed demo doctors when SEED_DEMO_DOCTORS=true
+    import os as _os
+    if _os.getenv("SEED_DEMO_DOCTORS", "").lower() == "true":
+        try:
+            from app.services.doctor_directory import seed_demo_doctors
+            seed_demo_doctors()
+            print("  Demo doctors seeded (SEED_DEMO_DOCTORS=true)")
+        except Exception as _exc:
+            print(f"  [WARN] Demo doctor seeding failed: {_exc}")
     else:
         print("  APScheduler not configured — scheduler module not found")
 

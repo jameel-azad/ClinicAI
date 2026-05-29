@@ -50,6 +50,12 @@ def handle_doctor_message(
         if approval_reply:
             return approval_reply
 
+    # MSG +91NUMBER message  — forward a reply to a patient
+    if doctor_number:
+        msg_reply = _handle_patient_msg(message, name)
+        if msg_reply:
+            return msg_reply
+
     if not text or text in {"hi", "hello", "start"}:
         return _doctor_greeting(name)
 
@@ -62,11 +68,76 @@ def handle_doctor_message(
     if text in {"pending", "inbox", "show inbox"}:
         return _format_pending_approvals(doctor_number)
 
+    # If doctor has an active reply context, silently forward freetext to that patient
+    if doctor_number:
+        ctx_reply = _handle_context_reply(message, doctor_number, name, text)
+        if ctx_reply:
+            return ctx_reply
+
     return (
         "I understood this as a doctor message, but I do not support that "
         "command yet.\n\n"
         "Try: today, pending, inbox, or help."
     )
+
+
+def _handle_patient_msg(message: str, doctor_name: str) -> str | None:
+    """
+    Handle: MSG +91XXXXXXXXXX your reply text
+    Forwards the doctor's freetext reply directly to a patient.
+    """
+    from app.services.whatsapp import send_whatsapp_message_sync
+
+    match = re.match(
+        r"(?i)^MSG\s+(\+?\d[\d\s\-()+]{7,}\d)\s+(.+)",
+        message.strip(),
+        re.DOTALL,
+    )
+    if not match:
+        return None
+
+    raw_number = match.group(1).strip()
+    patient_text = match.group(2).strip()
+
+    # Normalise to E.164-like format
+    digits = re.sub(r"\D", "", raw_number)
+    patient_number = f"+{digits}" if raw_number.startswith("+") else digits
+
+    if not patient_text:
+        return "Please include a message after the number. Example: *MSG +91NUMBER Hi, please take rest.*"
+
+    outbound = f"📩 *Dr. {doctor_name}:* {patient_text}"
+    sent = send_whatsapp_message_sync(patient_number, outbound)
+    if sent:
+        return f"✅ Message sent to {patient_number}."
+    return f"⚠️ Could not send message to {patient_number}. Please try again."
+
+
+def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, text_lower: str) -> str | None:
+    """
+    If the doctor has an active reply context (a patient just messaged them),
+    silently forward their freetext to that patient — no command needed.
+    Known commands are always caught before this function is reached, so
+    there is no risk of accidentally forwarding a command to a patient.
+    """
+    from app.services.store import get_doctor_reply_context
+    from app.services.whatsapp import send_whatsapp_message_sync
+
+    ctx = get_doctor_reply_context(doctor_number)
+    if not ctx:
+        return None
+
+    patient_number = ctx.get("patient_number", "")
+    patient_name = ctx.get("patient_name") or "patient"
+
+    if not patient_number or not message.strip():
+        return None
+
+    outbound = f"📩 *Dr. {doctor_name}:* {message.strip()}"
+    sent = send_whatsapp_message_sync(patient_number, outbound)
+    if sent:
+        return f"✅ Sent to {patient_name}."
+    return f"Could not reach {patient_name} ({patient_number}). Please try again."
 
 
 def _doctor_greeting(name: str) -> str:
@@ -84,12 +155,18 @@ def _help_message(name: str) -> str:
     clinic = os.getenv("CLINIC_NAME", "ClinicAI")
     return (
         f"Hello {name}. This is your {clinic} doctor interface.\n\n"
-        "Commands you can use:\n"
-        "- setup doctor\n"
-        "- profile\n"
-        "- today\n"
-        "- pending / inbox\n"
-        "- help"
+        "Commands:\n"
+        "- *setup doctor* — onboarding\n"
+        "- *profile* — view your profile\n"
+        "- *today* — today's appointments\n"
+        "- *pending / inbox* — pending approvals\n"
+        "- *APPROVE / REJECT {id}* — SOAP note approval\n"
+        "- *REGEN {id} feedback* — regenerate SOAP with correction\n"
+        "- *YES / NO {id}* — appointment approval\n"
+        "- *OK LAB{id}* — acknowledge lab report\n"
+        "- *MSG +91NUMBER message* — send a message to any patient\n"
+        "- *help* — show this menu\n\n"
+        "💡 When a patient sends you a follow-up reply, just type your response — it goes straight to them."
     )
 
 

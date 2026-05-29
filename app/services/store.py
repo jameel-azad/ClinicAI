@@ -143,6 +143,7 @@ _pending_soaps: dict[str, dict] = {}
 _pending_lab_reviews: dict[str, dict] = {}
 _consultations: dict[str, ConsultationSession] = {}
 _after_hours_queues: dict[str, list[dict]] = {}
+_doctor_reply_contexts: dict[str, dict] = {}  # doctor_number → {patient_number, patient_name}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -628,6 +629,38 @@ def get_after_hours_queue(doctor_number: str) -> list[dict]:
 def clear_after_hours_queue(doctor_number: str) -> None:
     _rdel(_key(f"afterhours:{doctor_number}"))
     _after_hours_queues.pop(doctor_number, None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCTOR REPLY CONTEXT
+# Remembers which patient last messaged a doctor so freetext replies are
+# automatically forwarded without the doctor needing to type a command.
+# Key: clinicai:doctor_reply_ctx:{doctor_number}   TTL 7200s (2h)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_TTL_REPLY_CTX = 7_200  # 2 hours
+
+
+def save_doctor_reply_context(doctor_number: str, patient_number: str, patient_name: str) -> None:
+    data = {
+        "patient_number": patient_number,
+        "patient_name": patient_name,
+        "saved_at": datetime.now().isoformat(),
+    }
+    _rset(_key(f"doctor_reply_ctx:{doctor_number}"), data, _TTL_REPLY_CTX)
+    _doctor_reply_contexts[doctor_number] = data
+
+
+def get_doctor_reply_context(doctor_number: str) -> Optional[dict]:
+    data = _rget(_key(f"doctor_reply_ctx:{doctor_number}"))
+    if data:
+        return data
+    return _doctor_reply_contexts.get(doctor_number)
+
+
+def clear_doctor_reply_context(doctor_number: str) -> None:
+    _rdel(_key(f"doctor_reply_ctx:{doctor_number}"))
+    _doctor_reply_contexts.pop(doctor_number, None)
 
 
 # ── Internal helper ────────────────────────────────────────────────────────────

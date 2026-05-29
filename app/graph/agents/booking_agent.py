@@ -282,6 +282,68 @@ def flow_node(state: BookingState) -> dict:
     booking_state = session_dict.get("state", "GREETING")
     entities = state.get("extracted_entities", {})
     bot_response = state.get("bot_response")
+    incoming_message = state.get("incoming_message", "")
+
+    # ── COLLECT_DOCTOR_PREFERENCE: patient is responding to the doctor list ──
+    if booking_state == "COLLECT_DOCTOR_PREFERENCE":
+        from app.services.doctor_directory import (
+            resolve_selection, format_for_whatsapp,
+            match_by_symptoms, all_doctors,
+        )
+        from app.services.store import find_doctor_profile_by_name
+
+        session = BookingSession(**session_dict)
+        shortlist = session.doctor_shortlist or []
+        doctors = [find_doctor_profile_by_name(n) for n in shortlist]
+        doctors = [d for d in doctors if d]
+        if not doctors:
+            doctors = match_by_symptoms(session.symptoms) if session.symptoms else all_doctors()
+
+        resolved = resolve_selection(incoming_message, doctors)
+        if resolved:
+            session.doctor_name = resolved
+            session.doctor_shortlist = None
+            # Check what's still missing after the doctor is chosen
+            remaining = []
+            if not session.patient_name: remaining.append("patient_name")
+            if not session.requested_date: remaining.append("requested_date")
+            if not session.requested_time: remaining.append("requested_time")
+
+            if not remaining:
+                session.state = "CONFIRM_SLOT"
+                return {
+                    "session": session.model_dump(),
+                    "current_booking_state": "CONFIRM_SLOT",
+                    "reply_message": MSG_CONFIRM.format(
+                        doctor=session.doctor_name,
+                        date=session.requested_date,
+                        time=session.requested_time,
+                    ),
+                    "pipeline_log": [f"flow_node: doctor={resolved}, all info present → CONFIRM_SLOT"],
+                }
+
+            # Still need name/date/time — ask for the remaining fields
+            session.state = "COLLECTING_INFO"
+            parts = [f"*{resolved}* selected!"]
+            parts.append("\nI still need a couple of details:\n")
+            if "patient_name" in remaining: parts.append("👤 *Patient name*")
+            if "requested_date" in remaining: parts.append("📅 *Preferred date* (e.g. 28th May)")
+            if "requested_time" in remaining: parts.append("🕐 *Preferred time* (e.g. 5 PM)")
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": "\n".join(parts),
+                "pipeline_log": [f"flow_node: doctor={resolved}, still need {remaining}"],
+            }
+
+        # Could not resolve — re-show the doctor list
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "COLLECT_DOCTOR_PREFERENCE",
+            "reply_message": "I didn't catch that. Please pick a doctor:\n\n" + format_for_whatsapp(doctors),
+            "pipeline_log": ["flow_node: COLLECT_DOCTOR_PREFERENCE — unresolved, re-asked"],
+        }
+    # ── END COLLECT_DOCTOR_PREFERENCE ────────────────────────────────────────
 
     if booking_state == "BOOKED":
         return {
@@ -355,6 +417,21 @@ def flow_node(state: BookingState) -> dict:
             state.get("intent") == "appointment_book"
             or _has_booking_keywords(state.get("incoming_message", ""))
         )
+
+        # When doctor_name is the only remaining unknown, show the doctor selection list
+        if missing == ["doctor_name"] and is_booking:
+            from app.services.doctor_directory import (
+                match_by_symptoms, all_doctors, format_for_whatsapp,
+            )
+            doctors = match_by_symptoms(session.symptoms) if session.symptoms else all_doctors()
+            session.state = "COLLECT_DOCTOR_PREFERENCE"
+            session.doctor_shortlist = [d.get("name") for d in doctors if d.get("name")]
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECT_DOCTOR_PREFERENCE",
+                "reply_message": format_for_whatsapp(doctors),
+                "pipeline_log": ["flow_node: doctor_name only missing → showing doctor list"],
+            }
 
         if is_booking or booking_state not in ("GREETING",):
             session.state = "COLLECTING_INFO"

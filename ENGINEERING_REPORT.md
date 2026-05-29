@@ -1,5 +1,5 @@
 # ClinicAI — Complete Engineering Report
-**Version:** 2.1.0 (Sprint 2, Complete)
+**Version:** 3.0.0 (Sprint 3, Complete)
 **Date:** 2026-05-29
 **Prepared from:** Live codebase at `D:\ClinicAI`
 
@@ -14,6 +14,8 @@ ClinicAI is a WhatsApp-native clinical front-desk assistant built on FastAPI + L
 **Sprint 1 scope:** Intent classification, multi-turn booking flow, appointment approval workflow, reminder + no-show recovery via APScheduler, clinical scribe (voice note → SOAP note PDF via Whisper + LLM + ReportLab), lab report parsing (PDF → LLM summary via pdfplumber + Groq).
 
 **Sprint 2 scope:** Full multi-agent refactor. RouterAgent dispatches to six specialist sub-agents. Net-new: ConsultationAgent (real-time doctor-patient consultation buffering with Jameel integration contract), AfterHoursAgent (message queue with morning flush), enhanced EmergencyAgent (doctor-side WhatsApp alert), FollowUpAgent, LabAgent. All Sprint 1 flows preserved through agent decomposition.
+
+**Sprint 3 scope:** HL7 FHIR R4 + SNOMED CT validation pipeline for AI-generated prescriptions. A new `fhir_coding_node` is inserted in the scribe pipeline after entity extraction. It assigns authoritative SNOMED CT concept IDs to every diagnosis and symptom, and RxNorm RxCUIs to every medication, via a dedicated terminology lookup layer (local curated JSON tables → NLM public API fallback → `UNKNOWN` sentinel). The LLM is explicitly excluded from code assignment. FHIR R4 Condition and MedicationRequest resources are built programmatically and bundled as a valid FHIR R4 Bundle. Codes appear in the PDF and in the doctor's WhatsApp approval message. A new `REGEN` command lets the doctor request SOAP regeneration with correction feedback without re-recording audio.
 
 **Stack:**
 - Runtime: Python 3.12, FastAPI, uvicorn
@@ -121,14 +123,29 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
         app/graph/classifier.py
         validate → preprocess → classify(Groq) → postprocess|fallback(Gemini)
 
-        ┌──────────────────────────────┐  ┌──────────────────────────────┐
-        │ ScribePipeline               │  │ ParserPipeline               │
-        │ app/graph/scribe/            │  │ app/graph/parser/            │
-        │ transcribe → soap_generator  │  │ pdfplumber→Groq→summary      │
-        │ → extract_entities           │  └──────────────────────────────┘
-        │ → grounding_check            │
-        │ → followup_generator → pdf   │
-        └──────────────────────────────┘
+        ┌────────────────────────────────────────┐  ┌──────────────────────────────┐
+        │ ScribePipeline (7 nodes, Sprint 3)     │  │ ParserPipeline               │
+        │ app/graph/scribe/                      │  │ app/graph/parser/            │
+        │ transcribe → soap_generator            │  │ pdfplumber→Groq→summary      │
+        │ → extract_entities                     │  └──────────────────────────────┘
+        │ → fhir_coding  ← NEW (Sprint 3)        │
+        │   (terminology lookup, no LLM)         │
+        │ → grounding_check                      │
+        │ → followup_generator → pdf             │
+        └────────────────────────────────────────┘
+
+        ┌────────────────────────────────────────┐
+        │ TerminologyService  (Sprint 3)          │
+        │ app/services/terminology.py             │
+        │ lookup_snomed(term)                     │
+        │   local JSON → NLM Clinical Tables API  │
+        │   → UNKNOWN                             │
+        │ lookup_rxnorm(drug)                     │
+        │   local JSON → NLM RxNorm API           │
+        │   → UNKNOWN                             │
+        │ data/terminology/snomed.json  (100+ terms)│
+        │ data/terminology/rxnorm.json  (80+ drugs)│
+        └────────────────────────────────────────┘
 
         ┌────────────────────────────────────────────────────────┐
         │  APScheduler BackgroundScheduler                        │
@@ -191,7 +208,7 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
 
 **`agents/lab_agent.py`** — Thin wrapper for when `lab_report_share` intent arrives but no PDF is attached. Prompts patient to forward the PDF.
 
-**`scribe/`** — LangGraph pipeline for clinical SOAP generation. `pipeline.py` compiles a 6-node graph: `transcribe_node` (Groq Whisper API) → `soap_generator_node` (LLaMA 3.3 70B) → `extract_entities_node` (LLaMA — extracts symptoms/medications/diagnoses as structured JSON) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (ReportLab). `nodes.py` also exports two confidence helpers: `overall_soap_confidence(soap_note)` computes the mean confidence across non-missing sections, and `low_confidence_section_names(soap_note)` returns section names whose confidence is below 0.6. State in `state.py` as `ScribeState` TypedDict — includes `clinical_entities: Optional[dict]`, `follow_up_days: Optional[int]`, `summary_for_whatsapp: Optional[str]`.
+**`scribe/`** — LangGraph pipeline for clinical SOAP generation. `pipeline.py` compiles a **7-node** graph (Sprint 3 added `fhir_coding_node`): `transcribe_node` (Groq Whisper API) → `soap_generator_node` (LLaMA 3.3 70B) → `extract_entities_node` (LLaMA — extracts symptoms/medications/diagnoses as structured JSON) → `fhir_coding_node` (terminology lookup, **no LLM**) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (ReportLab). `nodes.py` exports two confidence helpers: `overall_soap_confidence(soap_note)` and `low_confidence_section_names(soap_note)`. Also exports `fhir_coding_node` and private helpers `_validate_fhir_bundle`, `_build_condition_entry`, `_build_medication_request_entry`, `_parse_dose`, `_FREQUENCY_MAP`. State in `state.py` as `ScribeState` TypedDict — Sprint 3 added `fhir_bundle: Optional[dict]`, `snomed_mappings: Optional[list]`, `fhir_validation_errors: list[str]`.
 
 **`parser/`** — LangGraph pipeline for lab report extraction. `pipeline.py` compiles: PDF text extraction (pdfplumber) → LLM summary (Groq). State in `state.py`.
 
@@ -207,17 +224,19 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
 1. Downloads every audio file from the bundle via httpx (Twilio basic auth)
 2. Transcribes each file using Groq Whisper (`asyncio.to_thread` to avoid blocking FastAPI's event loop)
 3. `_build_combined_transcript()` merges all messages in order, prefixing each line with `PATIENT:` or `DOCTOR:` so the LLM understands who spoke
-4. Calls `soap_generator_node` → `extract_entities_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` directly (these are plain functions, no need to re-run the full LangGraph pipeline)
+4. Calls `soap_generator_node` → `extract_entities_node` → `fhir_coding_node` (Sprint 3) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` directly (plain functions, no need to re-run the full LangGraph pipeline)
 5. Computes `overall_soap_confidence(soap_note)` and `low_confidence_section_names(soap_note)` from `nodes.py` helpers
 6. Stores the PDF via `store_scribe_pdf()` and builds the public URL
-7. Returns `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp, clinical_entities, overall_confidence, low_confidence_sections}`
+7. Returns `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp, clinical_entities, overall_confidence, low_confidence_sections, fhir_bundle, snomed_mappings, fhir_validation_errors}` (last three are Sprint 3 additions)
 Cleans up all temp audio files regardless of success or failure.
 
-**`clinical_scribe.py`** — Doctor voice note handler. Sprint 2 added pre-check: `_try_buffer_doctor_audio()` scans `clinicai:consult:*` Redis keys, matches `session.doctor_number == doctor_number`, buffers audio as `ConsultationMessage(sender_role="doctor")` and appends to `session.audio_files`. If active consultation found, returns ack and skips local scribe pipeline. Local scribe pipeline: download audio (httpx with Twilio auth) → `_run_scribe_pipeline()` → extract patient number from caption or appointment lookup → save pending SOAP → send PDF + approval buttons to doctor.
+**`clinical_scribe.py`** — Doctor voice note handler. Sprint 2 added pre-check: `_try_buffer_doctor_audio()` scans `clinicai:consult:*` Redis keys, matches `session.doctor_number == doctor_number`, buffers audio as `ConsultationMessage(sender_role="doctor")` and appends to `session.audio_files`. If active consultation found, returns ack and skips local scribe pipeline. Local scribe pipeline: download audio (httpx with Twilio auth) → `_run_scribe_pipeline()` → extract patient number from caption or appointment lookup → save pending SOAP → send PDF + approval buttons to doctor. Sprint 3: pending SOAP record now also stores `transcript`, `clinical_entities`, `fhir_bundle`, `snomed_mappings` to enable REGEN without re-transcribing audio. The text-fallback approval message now includes a SNOMED CT / RxNorm summary block and a `REGEN` command hint. `_format_fhir_whatsapp_summary(snomed_mappings, fhir_bundle)` is a module-level helper that formats the coded-entities block (capped at 4 items each to respect WhatsApp message limits).
 
 **`appointment_approval.py`** — Approval workflow. `request_doctor_approval()` generates `APT{5-char}` approval ID, checks slot availability via Google Calendar or local scan, sends Twilio Content Template (interactive buttons) or text fallback. `handle_doctor_approval_reply()` parses `YES APT{id}` / `NO APT{id}` text. `handle_appointment_button_reply()` handles `apt_approve` / `apt_reject` payloads. `_approve()` creates `AppointmentRecord`, schedules reminder and no-show jobs, notifies patient. `_reject()` prompts patient for new slot.
 
-**`soap_approval.py`** — SOAP approval workflow. `handle_soap_approval_reply()` parses `APPROVE RX{id}` / `REJECT RX{id}`. `handle_soap_button_reply()` handles `soap_approve` / `soap_reject`. On approve: sends PDF to patient via `send_whatsapp_media_sync()`.
+**`soap_approval.py`** — SOAP approval workflow. `handle_soap_approval_reply()` parses `APPROVE RX{id}` / `REJECT RX{id}` / `REGEN RX{id} {feedback}` (Sprint 3). `handle_soap_button_reply()` handles `soap_approve` / `soap_reject`. On approve: sends PDF to patient via `send_whatsapp_media_sync()`. On `REGEN`: `_regen(soap_id, feedback)` re-runs the SOAP + FHIR coding pipeline from the stored transcript (no audio required), overwrites the existing PDF in-place so the same URL stays valid, updates the Redis record, and sends the regenerated PDF to the doctor for re-review.
+
+**`terminology.py`** — New in Sprint 3. Authoritative terminology lookup service. `lookup_snomed(term)` and `lookup_rxnorm(drug_name)` follow a three-step lookup: (1) local curated JSON table (`data/terminology/snomed.json` / `data/terminology/rxnorm.json`) — fast, offline, version-controlled; (2) NLM public API (`clinicaltables.nlm.nih.gov` for SNOMED CT, `rxnav.nlm.nih.gov` for RxNorm) — authoritative fallback for unmapped terms, ~100–200ms per call via `httpx`; (3) `UNKNOWN` sentinel — non-blocking, pipeline always completes. Results are cached in-process for the session lifetime. The LLM must not be used for code assignment; this module is the only code path that assigns SNOMED concept IDs or RxCUIs.
 
 **`identity.py`** — Sender identity resolution. Reads `DOCTOR_WHATSAPP_NUMBERS` env var (format: `"Dr Name:+91xxx,Dr Name2:+91xxx2"`). `identify_sender()` normalizes the raw Twilio `From` field and returns `SenderIdentity(phone_number, role, display_name)`. `find_doctor_number()` does fuzzy name match. `find_doctor_name()` does reverse lookup. `all_doctor_numbers()` returns list of all configured phone numbers.
 
@@ -252,6 +271,8 @@ All type definitions in one file:
 **`CLASSIFIER_FEW_SHOT`** — 9 few-shot examples covering: emergency in Hinglish, multi-intent booking+followup, relational terms, consultation messages during active session, injection attempt.
 
 **`BOOKING_ENTITY_PROMPT`** — Entity extraction for booking: date normalization, time normalization, doctor name extraction, "same day"/"usi din" resolution.
+
+**Note (Sprint 3):** `FHIR_CODING_PROMPT` was removed. SNOMED CT and RxNorm codes are no longer assigned by the LLM. All code assignment is delegated to `app/services/terminology.py` which queries authoritative sources (local curated tables and NLM public APIs). This is an intentional architectural constraint: the LLM extracts entity *names*; the terminology service assigns *codes*.
 
 ---
 
@@ -476,6 +497,21 @@ Step 4b — Entity extraction [extract_entities_node()]:
       "diagnoses":   ["Hypertension stage 1"]
     }
 
+Step 4c — FHIR coding [fhir_coding_node()] (Sprint 3, no LLM):
+  For each diagnosis/symptom → terminology.lookup_snomed(term)
+    "Hypertension stage 1" → local table miss → NLM API → 38341003 | Hypertensive disorder
+    "headache" → local table hit → 25064002 | Headache (finding)
+  For each medication → terminology.lookup_rxnorm(drug_name)
+    "Amlodipine" → local table hit → RxCUI 17767, "amlodipine"
+  Builds FHIR R4 Bundle programmatically:
+    entry[0]: Condition (Hypertension, SNOMED 38341003, unconfirmed)
+    entry[1]: Condition (Headache, SNOMED 25064002, unconfirmed)
+    entry[2]: MedicationRequest (Amlodipine 5mg OD, RxNorm 17767, status=active)
+  Injects real UUIDs for all resource IDs
+  _validate_fhir_bundle() → 0 structural errors
+  → snomed_mappings: [{clinical_term, snomed_concept_id, snomed_fsn, fhir_resource_type, source}, ...]
+  → fhir_bundle: {resourceType: "Bundle", type: "collection", entry: [...]}
+
 Step 5 — Grounding check [grounding_check_node()]:
   LLaMA checks every SOAP sentence against the transcript
   → grounding_report: [{sentence: "BP 140/90", transcript_segment: "BP thoda high", is_grounded: true}, ...]
@@ -495,6 +531,9 @@ Step 7 — PDF generation [pdf_output_node() → pdf_builder.build_soap_pdf()]:
     Header: "ClinicAI  |  Dr. Jameel  |  27 May 2026"
     Patient bar: "Patient: Suresh  |  Generated: 27 May 2026, 14:32"
     4 SOAP sections (colour-coded by confidence: green≥75%, amber≥50%, red<50%)
+    FHIR R4 CODED CLINICAL DATA section (Sprint 3):
+      Diagnoses & Symptoms — SNOMED CT table (Clinical Term | Concept ID | FSN)
+      Medications — RxNorm table (Drug Name | RxCUI | Dose / Frequency)
     Grounding report appendix table
     Transcript appendix
     Footer: "Generated by FellowAI Clinical Scribe · DPDP Act 2023 Compliant"
@@ -813,6 +852,60 @@ Current deployment is fully local development. No Dockerfile, no docker-compose,
 - `GET /debug/consultations` → all active ConsultationSession objects
 - All existing Sprint 1 debug endpoints preserved
 
+### Sprint 3
+
+**SNOMED CT + HL7 FHIR R4 Validation Pipeline:**
+
+*Design principle*: The LLM extracts entity *names*. The terminology service assigns *codes*. These responsibilities are strictly separated; the LLM must never be the authoritative source of medical terminology codes.
+
+**`fhir_coding_node` (new LangGraph node, `app/graph/scribe/nodes.py`):**
+- Inserted between `extract_entities_node` and `grounding_check_node` in the 7-node scribe pipeline
+- Inputs: `clinical_entities` from state (symptoms, medications, diagnoses)
+- For every diagnosis and symptom: calls `terminology.lookup_snomed(term)` → SNOMED CT concept ID + FSN
+- For every medication: calls `terminology.lookup_rxnorm(drug_name)` → RxNorm RxCUI + display name
+- Builds FHIR R4 Condition resources (one per diagnosis/symptom) and MedicationRequest resources (one per medication) programmatically in Python — no LLM call
+- Assembles a `Bundle` (type: `collection`) containing all resources
+- Injects Python-generated UUIDs for all resource IDs
+- Stamps `recordedDate` / `authoredOn` with current date
+- Calls `_validate_fhir_bundle()` — structural field-presence check (Condition: code.coding, clinicalStatus, subject; MedicationRequest: medicationCodeableConcept.coding, status, intent, subject)
+- **Non-blocking**: all errors go to `fhir_validation_errors`, never to `errors`. Pipeline completes even if all codes are `UNKNOWN`
+- `_FREQUENCY_MAP` maps `OD/BD/TDS/SOS` and long-form variants to FHIR GTSAbbreviation codes (`QD/BID/TID/PRN`)
+- `_parse_dose("5mg")` → `(5.0, "mg")` for FHIR `doseQuantity`
+
+**Terminology lookup service (`app/services/terminology.py`):**
+- `lookup_snomed(term, timeout=4.0)` — three-step lookup:
+  1. Local `data/terminology/snomed.json` — 100+ pre-normalised terms, multiple aliases per concept, includes Hinglish transliterations (e.g. `sar dard`, `kamar dard`, `loose motions`)
+  2. NLM Clinical Tables API: `GET https://clinicaltables.nlm.nih.gov/api/snomed_ct/v3/search?terms={term}&df=code,consumer_name&maxList=1`
+  3. `UNKNOWN` sentinel with the original term as `fsn`
+- `lookup_rxnorm(drug_name, timeout=4.0)` — three-step lookup:
+  1. Local `data/terminology/rxnorm.json` — 80+ entries including Indian brand names (Crocin, Dolo, Azee, Cifran, Voveran, Glycomet, Thyronorm, etc.)
+  2. NLM RxNorm API: `GET https://rxnav.nlm.nih.gov/REST/rxcui.json?name={drug}&search=1` then `/rxcui/{id}/properties.json` for display name
+  3. `UNKNOWN` sentinel
+- In-memory session cache (`_snomed_cache`, `_rxnorm_cache`) avoids redundant API calls for repeated terms within a pipeline run
+- `_normalize(term)` strips Hinglish parenthetical suffixes (e.g. `"fever (bukhar)"` → `"fever"`), lowercases, and collapses whitespace — applied both when building the table index and when querying
+- `clear_caches()` for test isolation
+
+**Terminology data files:**
+- `data/terminology/snomed.json` — sourced from SNOMED CT International Edition (browser.ihtsdotools.org). Covers disorders and findings for: hypertension, diabetes (T1/T2/general), fever, headache/migraine, cough (dry/productive), URI, asthma/COPD, anemia, hypothyroidism/hyperthyroidism, GERD/gastritis/peptic ulcer, dengue, typhoid, malaria, UTI, allergic rhinitis, eczema, hyperlipidemia, constipation, depression, anxiety, insomnia, vitamin deficiencies, osteoporosis/osteoarthritis/gout/rheumatoid arthritis, CKD, obesity, chest pain, breathlessness, dizziness/vertigo, back pain, joint/knee/shoulder/neck pain, abdominal pain, nausea/vomiting, diarrhea, fatigue, weight change, sore throat, runny nose, skin rash/itching, edema, palpitations, loss of appetite, dyspepsia, otalgia, myalgia, dysuria, urinary frequency
+- `data/terminology/rxnorm.json` — sourced from NLM RxNorm (ingredient-level RxCUIs). Covers: amlodipine/norvasc, metformin/glycomet, paracetamol/crocin/dolo, omeprazole, atorvastatin/atorva, azithromycin/azee, amoxicillin, amoxicillin-clavulanate/augmentin, pantoprazole/pantocid, cetirizine/cetzine, ibuprofen/brufen, aspirin/ecosprin, losartan, lisinopril, glimepiride, levothyroxine/thyronorm/eltroxin, metronidazole/metrogyl, ciprofloxacin/cifran, doxycycline, prednisolone/wysolone, montelukast/montair, salbutamol/ventolin, clonazepam, metoprolol, enalapril, simvastatin, rosuvastatin/rozat, sertraline/serta, diclofenac/voveran, cefixime/taxim, fluconazole, ranitidine, famotidine, rabeprazole, esomeprazole/nexium, folic acid, iron/ferrous sulfate, calcium carbonate, vitamin D/cholecalciferol, vitamin B12/methylcobalamin, atenolol, alprazolam, clopidogrel/plavix, glibenclamide
+
+**PDF FHIR section (`app/graph/scribe/pdf_builder.py`):**
+- `build_soap_pdf()` accepts two new optional parameters: `snomed_mappings: list | None` and `fhir_bundle: dict | None` (default `None` — backward compatible)
+- Renders "FHIR R4 CODED CLINICAL DATA" section between SOAP sections and the ungrounded flags summary (only if at least one mapping or resource is present)
+- Conditions table: Clinical Term | SNOMED CT ID | Fully Specified Name
+- Medications table: Drug Name | RxCUI | Dose / Frequency
+- Table styling matches existing grounding report (BRAND_BLUE header, LIGHT_BLUE alternating rows)
+
+**Doctor approval flow (Sprint 3 additions):**
+- Text-fallback approval message now prepends a SNOMED CT + RxNorm summary block (capped at 4 items each)
+- `REGEN {soap_id}` or `REGEN {soap_id} {feedback}` command (handled in `soap_approval._regen()`):
+  - Loads stored `transcript` from the pending SOAP Redis record
+  - If feedback provided: prepends `[DOCTOR CORRECTION: {feedback}]` to the transcript
+  - Re-runs: `soap_generator_node` → `extract_entities_node` → `fhir_coding_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node`
+  - Overwrites the stored PDF at `generated/scribe_pdfs/{document_id}.pdf` — same URL stays valid
+  - Updates Redis record with fresh `fhir_bundle`, `snomed_mappings`, `clinical_entities`, `follow_up_questions`; retains original `transcript` so subsequent REGENs correct against the true source
+  - Sends regenerated PDF to doctor with same APPROVE/REJECT/REGEN options
+
 ---
 
 ## 9. Sequence Diagram (Text Format)
@@ -954,10 +1047,32 @@ Patient        Twilio        webhook_router      RouterAgent      BookingAgent  
       "diagnoses":   ["Hypertension stage 1"]
     },
     "overall_confidence": 0.86,
-    "low_confidence_sections": []
+    "low_confidence_sections": [],
+    "snomed_mappings": [
+      {"clinical_term": "Hypertension stage 1", "snomed_concept_id": "38341003",
+       "snomed_fsn": "Hypertensive disorder (disorder)", "fhir_resource_type": "Condition", "source": "nlm_api"},
+      {"clinical_term": "headache", "snomed_concept_id": "25064002",
+       "snomed_fsn": "Headache (finding)", "fhir_resource_type": "Condition", "source": "local"}
+    ],
+    "fhir_bundle": {
+      "resourceType": "Bundle", "id": "<uuid>", "type": "collection", "timestamp": "...",
+      "entry": [
+        {"resource": {"resourceType": "Condition", "id": "<uuid>",
+          "code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder (disorder)"}]},
+          "clinicalStatus": {"coding": [{"code": "active"}]},
+          "verificationStatus": {"coding": [{"code": "unconfirmed"}]},
+          "subject": {"reference": "Patient/unknown"}, "recordedDate": "2026-05-29"}},
+        {"resource": {"resourceType": "MedicationRequest", "id": "<uuid>",
+          "status": "active", "intent": "order",
+          "medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "17767", "display": "amlodipine"}], "text": "Amlodipine"},
+          "dosageInstruction": [{"text": "5mg once daily", "timing": {"code": {"coding": [{"code": "QD"}]}}, "doseAndRate": [{"doseQuantity": {"value": 5.0, "unit": "mg"}}]}],
+          "subject": {"reference": "Patient/unknown"}, "authoredOn": "2026-05-29"}}
+      ]
+    },
+    "fhir_validation_errors": []
   }
   ```
-- Purpose: Full consultation-to-SOAP pipeline. Downloads + transcribes audio, generates SOAP note, returns PDF URL.
+- Purpose: Full consultation-to-SOAP pipeline. Downloads + transcribes audio, generates SOAP note with SNOMED CT + FHIR R4 coding, returns PDF URL.
 - Called by: `consultation_service._call_jameel()` — directly (in-process) when `JAMEEL_SCRIBE_URL` is empty, or via HTTP when URL is set.
 
 ### PDF downloads
@@ -1019,16 +1134,22 @@ main.py
 │   │       │   ├── app.services.whatsapp
 │   │       │   └── app.services.scribe_service  ← lazy import (when JAMEEL_SCRIBE_URL empty)
 │   │       │       ├── app.graph.scribe.nodes (soap_generator_node, extract_entities_node,
-│   │       │       │     grounding_check_node, followup_generator_node, pdf_output_node,
-│   │       │       │     overall_soap_confidence, low_confidence_section_names)
+│   │       │       │     fhir_coding_node, grounding_check_node, followup_generator_node,
+│   │       │       │     pdf_output_node, overall_soap_confidence, low_confidence_section_names)
+│   │       │       │     └── app.services.terminology (lookup_snomed, lookup_rxnorm)
+│   │       │       │         └── data/terminology/snomed.json, rxnorm.json  [local tables]
+│   │       │       │         └── https://clinicaltables.nlm.nih.gov  [NLM SNOMED API]
+│   │       │       │         └── https://rxnav.nlm.nih.gov           [NLM RxNorm API]
 │   │       │       ├── app.graph.scribe.pdf_builder (ReportLab)
 │   │       │       ├── app.services.clinical_scribe (store_scribe_pdf)
 │   │       │       └── app.services.identity (find_doctor_name)
 │   │       └── app.schemas (ConsultationSession, ConsultationMessage)
 │   │
 │   ├── app.services.clinical_scribe
-│   │   ├── app.graph.scribe.pipeline (scribe_pipeline)
-│   │   │   ├── app.graph.scribe.nodes (transcribe, soap, extract_entities, grounding, followup, pdf)
+│   │   ├── app.graph.scribe.pipeline (scribe_pipeline — 7 nodes)
+│   │   │   ├── app.graph.scribe.nodes (transcribe, soap, extract_entities,
+│   │   │   │     fhir_coding, grounding, followup, pdf)
+│   │   │   │     └── app.services.terminology
 │   │   │   ├── app.graph.scribe.state
 │   │   │   └── app.graph.scribe.pdf_builder (ReportLab)
 │   │   ├── app.graph.scribe.nodes (overall_soap_confidence, low_confidence_section_names)
@@ -1036,6 +1157,9 @@ main.py
 │   │   ├── app.services.whatsapp
 │   │   └── app.services.soap_approval
 │   │       ├── app.services.store
+│   │       ├── app.services.clinical_scribe (_format_fhir_whatsapp_summary, GENERATED_DIR, _pdf_store)
+│   │       ├── app.graph.scribe.nodes (fhir_coding_node, soap_generator_node, ...)
+│   │       │     └── app.services.terminology
 │   │       └── app.services.scheduler (schedule_followup_message)
 │   │
 │   ├── app.services.pdf_service
@@ -1076,7 +1200,10 @@ main.py
 
 ### Critical for production
 
-**1. ~~Jameel API integration~~ DONE — scribe pipeline is fully implemented locally**
+**1. ~~SNOMED CT + HL7 FHIR R4 validation~~ DONE (Sprint 3)**
+SNOMED CT concept IDs and RxNorm RxCUIs are assigned by the terminology lookup service (local JSON tables → NLM public API → UNKNOWN). FHIR R4 Condition and MedicationRequest resources are built programmatically. Codes appear in the PDF and the doctor's approval message. REGEN command allows regeneration with correction feedback. The LLM is not used for code assignment.
+
+**2. ~~Jameel API integration~~ DONE — scribe pipeline is fully implemented locally**
 `JAMEEL_SCRIBE_URL` is empty in `.env`. `consultation_service._call_jameel()` now calls `scribe_service.process_consultation_bundle()` directly — the full Whisper → SOAP → PDF pipeline runs locally. No stub. When Jameel's service is hosted independently, set `JAMEEL_SCRIBE_URL` to `POST /scribe/consult` and it switches to HTTP without any code changes. The `POST /scribe/consult` endpoint (`scribe_router.py`) is already live in the running app.
 
 **2. Doctor-side consultation close not fully implemented**
@@ -1166,4 +1293,17 @@ After every successful routing, `webhook_router.py` saves `reply_message[:300]` 
 
 ---
 
-*Report generated from live codebase. Verified against actual file contents at `D:\ClinicAI` on 2026-05-29. Sprint 2 is complete — all Nabil and Jameel deliverables implemented.*
+### Sprint 3 — Open items
+
+**15. NLM API calls add latency for unmapped terms**
+The terminology service makes synchronous `httpx` calls (timeout 4s) for terms not in the local JSON tables. For a typical consultation, all common Indian clinic terms resolve locally. For unusual terms, each unmatched term adds up to 4s of wait time per lookup. The local tables cover ~100 conditions and ~80 drugs. Mitigation: expand the local tables as new terms appear in production logs. Future option: cache API hits persistently in Redis across restarts.
+
+**16. Terminology data files require manual curation**
+`data/terminology/snomed.json` and `data/terminology/rxnorm.json` are version-controlled JSON files. New clinic-specific terms (regional drug names, speciality conditions) must be added manually. A tooling script to query the NLM APIs and append verified entries would reduce maintenance overhead.
+
+**17. SNOMED CT license compliance for commercial use**
+SNOMED CT International Edition is available free for non-commercial use in most countries. Commercial deployment in India may require registration with the Indian National Release Centre or SNOMED International. NLM RxNorm is in the public domain. Verify licensing before commercial production launch.
+
+---
+
+*Report updated from live codebase at `D:\ClinicAI` on 2026-05-29. Sprint 3 complete — SNOMED CT + HL7 FHIR R4 validation pipeline implemented with authoritative terminology lookup layer.*

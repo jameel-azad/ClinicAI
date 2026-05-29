@@ -31,10 +31,13 @@ import httpx
 from dotenv import load_dotenv
 
 from app.graph.scribe.nodes import (
+    extract_entities_node,
     soap_generator_node,
     grounding_check_node,
     followup_generator_node,
     pdf_output_node,
+    overall_soap_confidence,
+    low_confidence_section_names,
 )
 from app.graph.scribe.state import ScribeState
 
@@ -110,6 +113,7 @@ async def process_consultation_bundle(bundle: dict) -> dict:
     }
 
     state = {**state, **soap_generator_node(state)}
+    state = {**state, **extract_entities_node(state)}
     state = {**state, **grounding_check_node(state)}
     state = {**state, **followup_generator_node(state)}
     state = {**state, **pdf_output_node(state)}
@@ -132,6 +136,7 @@ async def process_consultation_bundle(bundle: dict) -> dict:
 
     _cleanup(temp_paths)
 
+    soap_note = state.get("soap_note", {})
     return {
         "soap_note_pdf_url": soap_note_pdf_url,
         "follow_up_questions": state.get("follow_up_questions", []),
@@ -140,6 +145,9 @@ async def process_consultation_bundle(bundle: dict) -> dict:
             state.get("summary_for_whatsapp")
             or _build_fallback_summary(state)
         ),
+        "clinical_entities": state.get("clinical_entities") or {"symptoms": [], "medications": [], "diagnoses": []},
+        "overall_confidence": overall_soap_confidence(soap_note),
+        "low_confidence_sections": low_confidence_section_names(soap_note),
     }
 
 

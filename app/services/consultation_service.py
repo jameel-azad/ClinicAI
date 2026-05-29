@@ -109,6 +109,7 @@ async def finalize_and_send(patient_number: str) -> str:
     summary = result.get("summary_for_whatsapp", "")
     follow_up_qs = result.get("follow_up_questions", [])
     soap_pdf_url = result.get("soap_note_pdf_url")
+    low_conf_sections = result.get("low_confidence_sections", [])
 
     clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
     doctor_summary = (
@@ -123,6 +124,12 @@ async def finalize_and_send(patient_number: str) -> str:
         doctor_summary += f"\n\n*Follow-up questions to ask patient:*\n{qs_text}"
     if soap_pdf_url:
         doctor_summary += f"\n\n📄 SOAP PDF: {soap_pdf_url}"
+    if low_conf_sections:
+        sections_str = ", ".join(f"[{s}]" for s in low_conf_sections)
+        doctor_summary += (
+            f"\n\n⚠️ *Low confidence warning:* I am not confident about the "
+            f"{sections_str} section(s). Please review the SOAP note carefully."
+        )
 
     send_whatsapp_message_sync(session.doctor_number, doctor_summary)
     print(f"[ConsultationService] Summary sent to doctor {session.doctor_number}")

@@ -1,8 +1,8 @@
-# ClinicAI — Sprint 2
+# ClinicAI — Sprint 2 (Complete)
 
 ClinicAI is a WhatsApp-native clinic assistant built on FastAPI + LangGraph. It covers the full patient lifecycle — appointment booking, real-time consultation orchestration, clinical SOAP note generation, lab report parsing, and post-visit follow-up — entirely over WhatsApp using Twilio.
 
-**Sprint 2** refactors the single booking pipeline into a full multi-agent system: `RouterAgent → {BookingAgent, ConsultationAgent, EmergencyAgent, AfterHoursAgent, LabAgent, FollowUpAgent}` with a Jameel-side clinical scribe pipeline that converts consultation bundles into SOAP note PDFs.
+**Sprint 2** refactors the single booking pipeline into a full multi-agent system: `RouterAgent → {BookingAgent, ConsultationAgent, EmergencyAgent, AfterHoursAgent, LabAgent, FollowUpAgent}` with a Jameel-side clinical scribe pipeline that converts consultation bundles into SOAP note PDFs, a structured clinical entity extractor, confidence-aware doctor alerts, and a weekly practice insights report.
 
 ---
 
@@ -12,12 +12,15 @@ ClinicAI is a WhatsApp-native clinic assistant built on FastAPI + LangGraph. It 
 - **10-intent classifier** — Groq LLaMA 3.3 70B with Gemini 2.5 Flash fallback; bilingual Hindi/English (Hinglish); context-aware using previous bot response.
 - **Appointment booking** — Multi-turn state machine; doctor approval via WhatsApp interactive buttons or text; Google Calendar integration (optional).
 - **ConsultationAgent** — Buffers all patient text + doctor voice notes into a `ConsultationSession`; ends on closing phrase or inactivity timeout; triggers full SOAP pipeline.
-- **Clinical scribe pipeline** — Consultation bundle → Whisper transcription → LLaMA SOAP generation → grounding check → follow-up questions → ReportLab PDF → delivered to doctor via WhatsApp.
-- **Single voice note scribe** — Doctor sends standalone voice note → Whisper → SOAP PDF → doctor approves → sent to patient.
-- **Lab report parsing** — Patient sends PDF → pdfplumber extraction → Groq summary → forwarded to doctor.
+- **Clinical scribe pipeline** — Consultation bundle → Whisper transcription → LLaMA SOAP generation → clinical entity extraction → grounding check → follow-up questions → ReportLab PDF → delivered to doctor via WhatsApp.
+- **Clinical entity extractor** — After every SOAP generation, extracts all symptoms (name, severity, duration), medications (name, dose, frequency), and diagnoses from the transcript + SOAP note as structured JSON (`clinical_entities`).
+- **SOAP confidence hardening** — Overall SOAP confidence is computed after every voice note or consultation. If confidence < 0.6, the doctor receives a named section warning (`⚠️ I am not confident about [Assessment]`) alongside the PDF, both in the standalone voice note flow and in the consultation summary.
+- **Single voice note scribe** — Doctor sends standalone voice note → Whisper → SOAP PDF → confidence check → doctor approves → sent to patient.
+- **Lab report parsing** — Patient sends PDF → pdfplumber extraction + OCR fallback → critical value flagging (CBC, LFT, KFT, Lipid, Thyroid thresholds) → Groq summary → forwarded to doctor.
 - **After-hours agent** — Messages outside clinic hours queued to Redis, re-injected at opening time.
 - **Emergency agent** — Instant 112 response to patient + alert to all configured doctors.
-- **APScheduler jobs** — Appointment reminder, no-show recovery (×2), consultation inactivity timeout, daily after-hours flush.
+- **Weekly practice insights** — Every Monday at 8 AM IST, each doctor receives a 7-day summary: total appointments, past vs. upcoming, estimated no-show rate, busiest day, busiest time slot, and top 3 patient complaints.
+- **APScheduler jobs** — Appointment reminder, no-show recovery (×2), consultation inactivity timeout, daily after-hours flush, weekly insights (Monday 8 AM).
 - **Redis persistence** — All sessions, appointments, consultations, approvals stored in Redis with TTLs; in-memory fallback for dev.
 - **`dev_start.py`** — One-command dev startup: ngrok + auto-writes `PUBLIC_BASE_URL` to `.env` + uvicorn.
 
@@ -48,15 +51,15 @@ app/
 │   │   ├── followup_agent.py             Post-consultation follow-up handling
 │   │   └── lab_agent.py                  Lab report intent (no PDF attached)
 │   ├── scribe/
-│   │   ├── pipeline.py                   Single-voice-note scribe LangGraph
-│   │   ├── nodes.py                      Whisper, SOAP generator, grounding check, follow-up, PDF
-│   │   ├── state.py                      ScribeState TypedDict
+│   │   ├── pipeline.py                   Scribe LangGraph: transcribe → soap → extract_entities → grounding → follow-up → pdf
+│   │   ├── nodes.py                      Whisper, SOAP generator, entity extractor, confidence helpers, grounding check, follow-up, PDF
+│   │   ├── state.py                      ScribeState TypedDict (includes clinical_entities, follow_up_days)
 │   │   └── pdf_builder.py               ReportLab SOAP PDF builder
 │   └── parser/                           Lab report extraction pipeline
 │
 ├── services/
 │   ├── store.py                          Redis + in-memory dual persistence layer
-│   ├── scheduler.py                      APScheduler jobs (reminder, no-show, timeout, flush)
+│   ├── scheduler.py                      APScheduler jobs (reminder, no-show, timeout, flush, weekly insights)
 │   ├── consultation_service.py           Consultation bundle builder + Jameel API caller
 │   ├── scribe_service.py                 Jameel-side: bundle → transcribe → SOAP → PDF
 │   ├── clinical_scribe.py               Single voice note download + scribe orchestration
@@ -119,6 +122,7 @@ CLINIC_CLOSE_HOUR=20
 # Timing — use demo values below for testing, revert to production values before go-live
 REMINDER_MINUTES_BEFORE=2          # Demo: 2 min | Production: 120
 CONSULTATION_TIMEOUT_MINUTES=2     # Demo: 2 min | Production: 30
+WEEKLY_INSIGHTS_HOUR=8             # Hour (IST, 24h) to send Monday practice insights to doctors
 
 # Jameel scribe API — leave empty to run locally, set URL when deployed separately
 JAMEEL_SCRIBE_URL=
@@ -344,6 +348,16 @@ This tests the standalone scribe pipeline (not inside a consultation).
 
 > To specify the patient explicitly, send the voice note with caption: `Patient: +91XXXXXXXXXX`
 
+**Confidence hardening check:**
+
+If the SOAP note has overall confidence < 0.6 across non-missing sections, the doctor's message includes a warning alongside the PDF:
+
+```
+⚠️ Low confidence warning: I am not confident about the [Objective] section(s). Please review carefully before sending.
+```
+
+To trigger this: speak a deliberately vague voice note (no objective clinical measurements) and the Objective section confidence should drop below 0.6.
+
 ---
 
 ### Test 9 — Consultation Lifecycle (Sprint 2 core feature)
@@ -461,7 +475,14 @@ curl -X POST http://localhost:8000/scribe/consult `
   "soap_note_pdf_url": "https://...ngrok.../scribe/pdf/...",
   "follow_up_questions": ["How are you feeling today?", "..."],
   "missing_sections": [],
-  "summary_for_whatsapp": "Dx: Mild headache | Rx: Paracetamol 500mg OD"
+  "summary_for_whatsapp": "Dx: Mild headache | Rx: Paracetamol 500mg OD",
+  "clinical_entities": {
+    "symptoms": [{"name": "headache", "severity": "mild", "duration": "morning"}],
+    "medications": [{"name": "Paracetamol", "dose": "500mg", "frequency": "OD"}],
+    "diagnoses": ["Mild cephalgia"]
+  },
+  "overall_confidence": 0.82,
+  "low_confidence_sections": []
 }
 ```
 
@@ -491,6 +512,47 @@ From the patient phone: `doctor ne jo follow up questions pooche the, kya hain w
 **Expected at +24hr:** Second follow-up message with reschedule prompt.
 
 > The no-show check is skipped if `last_active` timestamp is newer than the appointment time — i.e. if the patient sent any message after the appointment.
+
+---
+
+### Test 14 — Weekly Practice Insights
+
+The weekly insights job fires every Monday at `WEEKLY_INSIGHTS_HOUR` IST. To verify without waiting until Monday, temporarily trigger it via the scheduler or call `_weekly_insights_job(doctor_number)` directly in a Python shell.
+
+First book and confirm 2–3 appointments to populate data:
+
+1. Complete Test 2 twice (two bookings for different time slots).
+2. Open a Python shell in the project root:
+
+```powershell
+python -c "
+import os; os.chdir(r'D:\ClinicAI')
+from app.services.scheduler import _weekly_insights_job
+_weekly_insights_job('+919801581020')
+"
+```
+
+**Expected on doctor phone:**
+
+```
+📊 ClinicAI — Weekly Practice Report
+Week of 22 May 2026
+
+Total appointments: 2
+  ✅ Past: 1 | ⏳ Upcoming: 1
+  ❌ Estimated no-shows: 0
+
+📅 Busiest day: Thursday (1 appointments)
+⏰ Busiest time: Morning (10:00 AM – 12:00 PM)
+
+🩺 Top patient complaints:
+  • fever: 1 patient(s)
+  • headache: 1 patient(s)
+
+Stay healthy! See you next week. 🌟
+```
+
+> `WEEKLY_INSIGHTS_HOUR` defaults to `8` (8 AM IST). Change in `.env` to adjust delivery time.
 
 ---
 
@@ -610,7 +672,7 @@ SOAP_APPROVAL_CONTENT_SID=HXxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Production Notes
 
-- **Revert demo timing values** before go-live: `REMINDER_MINUTES_BEFORE=120`, `CONSULTATION_TIMEOUT_MINUTES=30`
+- **Revert demo timing values** before go-live: `REMINDER_MINUTES_BEFORE=120`, `CONSULTATION_TIMEOUT_MINUTES=30`, `WEEKLY_INSIGHTS_HOUR=8` (8 AM IST is production-ready; adjust to doctor's preference)
 - **LangGraph MemorySaver** is in-process only — a server restart loses thread checkpoints. Replace with `RedisSaver` for production.
 - **Debug endpoints** (`/debug/*`) are unauthenticated — remove or gate behind auth before exposing publicly.
 - **`.env` must not be committed** — it contains live API keys.

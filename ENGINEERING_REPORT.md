@@ -1,6 +1,6 @@
 # ClinicAI — Complete Engineering Report
-**Version:** 2.0.0 (Sprint 2, Multi-Agent)
-**Date:** 2026-05-27
+**Version:** 2.1.0 (Sprint 2, Complete)
+**Date:** 2026-05-29
 **Prepared from:** Live codebase at `D:\ClinicAI`
 
 ---
@@ -121,11 +121,14 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
         app/graph/classifier.py
         validate → preprocess → classify(Groq) → postprocess|fallback(Gemini)
 
-        ┌──────────────────────┐  ┌──────────────────────────────┐
-        │ ScribePipeline       │  │ ParserPipeline               │
-        │ app/graph/scribe/    │  │ app/graph/parser/            │
-        │ Whisper→LLaMA→PDF    │  │ pdfplumber→Groq→summary      │
-        └──────────────────────┘  └──────────────────────────────┘
+        ┌──────────────────────────────┐  ┌──────────────────────────────┐
+        │ ScribePipeline               │  │ ParserPipeline               │
+        │ app/graph/scribe/            │  │ app/graph/parser/            │
+        │ transcribe → soap_generator  │  │ pdfplumber→Groq→summary      │
+        │ → extract_entities           │  └──────────────────────────────┘
+        │ → grounding_check            │
+        │ → followup_generator → pdf   │
+        └──────────────────────────────┘
 
         ┌────────────────────────────────────────────────────────┐
         │  APScheduler BackgroundScheduler                        │
@@ -135,6 +138,7 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
         │  · noshow_24hr_{appt_id}        DateTrigger            │
         │  · consult_timeout_{patient}    DateTrigger            │
         │  · afterhours_flush_{doctor}    CronTrigger daily      │
+        │  · weekly_insights_{doctor}     CronTrigger weekly Mon │
         └────────────────────────────────────────────────────────┘
 
         ┌────────────────────────────────────────────────────────┐
@@ -187,7 +191,7 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
 
 **`agents/lab_agent.py`** — Thin wrapper for when `lab_report_share` intent arrives but no PDF is attached. Prompts patient to forward the PDF.
 
-**`scribe/`** — LangGraph pipeline for clinical SOAP generation. `pipeline.py` compiles: `transcribe_node` (Groq Whisper API) → `soap_generator_node` (LLaMA 3.3 70B) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (ReportLab). State in `state.py` as `ScribeState` TypedDict.
+**`scribe/`** — LangGraph pipeline for clinical SOAP generation. `pipeline.py` compiles a 6-node graph: `transcribe_node` (Groq Whisper API) → `soap_generator_node` (LLaMA 3.3 70B) → `extract_entities_node` (LLaMA — extracts symptoms/medications/diagnoses as structured JSON) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (ReportLab). `nodes.py` also exports two confidence helpers: `overall_soap_confidence(soap_note)` computes the mean confidence across non-missing sections, and `low_confidence_section_names(soap_note)` returns section names whose confidence is below 0.6. State in `state.py` as `ScribeState` TypedDict — includes `clinical_entities: Optional[dict]`, `follow_up_days: Optional[int]`, `summary_for_whatsapp: Optional[str]`.
 
 **`parser/`** — LangGraph pipeline for lab report extraction. `pipeline.py` compiles: PDF text extraction (pdfplumber) → LLM summary (Groq). State in `state.py`.
 
@@ -195,17 +199,18 @@ Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS e
 
 **`store.py`** — Dual persistence layer. Attempts Redis connection at import (`_connect_redis()`); falls back silently to in-memory dicts. All public functions have identical signatures regardless of backend. Key prefix `clinicai:`. Sprint 2 adds `_consultations: dict` and `_after_hours_queues: dict` in-memory fallbacks, plus 7 new public functions for consultation and after-hours queue management.
 
-**`scheduler.py`** — APScheduler BackgroundScheduler. Sprint 1: reminder jobs (`reminder_{id}` via DateTrigger), no-show jobs (`noshow_1hr_{id}`, `noshow_24hr_{id}` via DateTrigger). Sprint 2: consultation timeout jobs (`consult_timeout_{patient}` via DateTrigger, `replace_existing=True` so `reset_consultation_timeout()` just calls `schedule_consultation_timeout()` again), after-hours flush jobs (`afterhours_flush_{doctor}` via CronTrigger at `CLINIC_OPEN_HOUR:00 IST`). `_resolve_appointment_datetime()` handles today/aaj, tomorrow/kal, parso, and explicit month+day with year.
+**`scheduler.py`** — APScheduler BackgroundScheduler. Sprint 1: reminder jobs (`reminder_{id}` via DateTrigger), no-show jobs (`noshow_1hr_{id}`, `noshow_24hr_{id}` via DateTrigger). Sprint 2: consultation timeout jobs (`consult_timeout_{patient}` via DateTrigger, `replace_existing=True` so `reset_consultation_timeout()` just calls `schedule_consultation_timeout()` again), after-hours flush jobs (`afterhours_flush_{doctor}` via CronTrigger at `CLINIC_OPEN_HOUR:00 IST`). Also: weekly practice insights (`weekly_insights_{doctor}` via CronTrigger `day_of_week="mon"` at `WEEKLY_INSIGHTS_HOUR:00 IST`). The insights job aggregates 7-day appointment data per doctor — total count, past vs. upcoming, estimated no-shows (heuristic: slot passed + `reminder_sent=True` + no `last_active` activity after appointment time), busiest day, busiest time slot (Morning/Afternoon/Evening), top 3 symptoms — and sends a formatted WhatsApp report. `_resolve_appointment_datetime()` handles today/aaj, tomorrow/kal, parso, and explicit month+day with year.
 
-**`consultation_service.py`** — New in Sprint 2. `build_consultation_bundle()` serializes the `ConsultationSession` into Jameel's integration contract (patient_id, doctor_id, messages array, audio_files array). `_call_jameel()` dispatches based on `JAMEEL_SCRIBE_URL`: if set, POSTs the bundle to the external API (60s timeout); if empty, calls `scribe_service.process_consultation_bundle()` directly in-process — no stub, no HTTP hop, the real pipeline runs. `finalize_and_send()` orchestrates: load session → build bundle → call `_call_jameel()` → compose doctor summary → send via WhatsApp → set `journey_state = "POST_CONSULT"` on `BookingSession` → delete `ConsultationSession` from Redis. Returns patient-facing reply string.
+**`consultation_service.py`** — New in Sprint 2. `build_consultation_bundle()` serializes the `ConsultationSession` into Jameel's integration contract (patient_id, doctor_id, messages array, audio_files array). `_call_jameel()` dispatches based on `JAMEEL_SCRIBE_URL`: if set, POSTs the bundle to the external API (60s timeout); if empty, calls `scribe_service.process_consultation_bundle()` directly in-process — no stub, no HTTP hop, the real pipeline runs. `finalize_and_send()` orchestrates: load session → build bundle → call `_call_jameel()` → compose doctor summary (appends `⚠️ Low confidence warning: [Section]` if `low_confidence_sections` is non-empty) → send via WhatsApp → set `journey_state = "POST_CONSULT"` on `BookingSession` → delete `ConsultationSession` from Redis. Returns patient-facing reply string.
 
 **`scribe_service.py`** — New (Jameel's side). The full consultation-to-SOAP pipeline:
 1. Downloads every audio file from the bundle via httpx (Twilio basic auth)
 2. Transcribes each file using Groq Whisper (`asyncio.to_thread` to avoid blocking FastAPI's event loop)
 3. `_build_combined_transcript()` merges all messages in order, prefixing each line with `PATIENT:` or `DOCTOR:` so the LLM understands who spoke
-4. Calls `soap_generator_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` directly (these are plain functions, no need to re-run the full LangGraph pipeline)
-5. Stores the PDF via `store_scribe_pdf()` and builds the public URL
-6. Returns `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp}`
+4. Calls `soap_generator_node` → `extract_entities_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` directly (these are plain functions, no need to re-run the full LangGraph pipeline)
+5. Computes `overall_soap_confidence(soap_note)` and `low_confidence_section_names(soap_note)` from `nodes.py` helpers
+6. Stores the PDF via `store_scribe_pdf()` and builds the public URL
+7. Returns `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp, clinical_entities, overall_confidence, low_confidence_sections}`
 Cleans up all temp audio files regardless of success or failure.
 
 **`clinical_scribe.py`** — Doctor voice note handler. Sprint 2 added pre-check: `_try_buffer_doctor_audio()` scans `clinicai:consult:*` Redis keys, matches `session.doctor_number == doctor_number`, buffers audio as `ConsultationMessage(sender_role="doctor")` and appends to `session.audio_files`. If active consultation found, returns ack and skips local scribe pipeline. Local scribe pipeline: download audio (httpx with Twilio auth) → `_run_scribe_pipeline()` → extract patient number from caption or appointment lookup → save pending SOAP → send PDF + approval buttons to doctor.
@@ -462,6 +467,15 @@ Step 4 — SOAP generation [soap_generator_node()]:
     }
   missing_sections: []
 
+Step 4b — Entity extraction [extract_entities_node()]:
+  LLaMA 3.3 70B with ENTITY_EXTRACT_SYSTEM prompt (SECURITY GUARDRAIL against injection)
+  Input: transcript + soap_note context
+  → clinical_entities = {
+      "symptoms":    [{"name": "headache", "severity": "mild", "duration": "since morning"}],
+      "medications": [{"name": "Amlodipine", "dose": "5mg", "frequency": "once daily"}],
+      "diagnoses":   ["Hypertension stage 1"]
+    }
+
 Step 5 — Grounding check [grounding_check_node()]:
   LLaMA checks every SOAP sentence against the transcript
   → grounding_report: [{sentence: "BP 140/90", transcript_segment: "BP thoda high", is_grounded: true}, ...]
@@ -497,10 +511,13 @@ Step 9 — Cleanup:
   os.remove("/tmp/tmpXXXX.ogg")
 
 Output: {
-  soap_note_pdf_url: "https://...ngrok.../scribe/pdf/abc-123",
-  follow_up_questions: ["How are you feeling?", ...],
-  missing_sections: [],
-  summary_for_whatsapp: "Suresh | Dx: Hypertension stage 1 | Rx: Amlodipine 5mg OD"
+  soap_note_pdf_url:     "https://...ngrok.../scribe/pdf/abc-123",
+  follow_up_questions:   ["How are you feeling?", ...],
+  missing_sections:      [],
+  summary_for_whatsapp:  "Suresh | Dx: Hypertension stage 1 | Rx: Amlodipine 5mg OD",
+  clinical_entities:     {symptoms: [...], medications: [...], diagnoses: [...]},
+  overall_confidence:    0.86,
+  low_confidence_sections: []
 }
 ```
 
@@ -631,6 +648,7 @@ CLINIC_OPEN_HOUR=9                  # After-hours window start (IST)
 CLINIC_CLOSE_HOUR=20                # After-hours window end (IST)
 REMINDER_MINUTES_BEFORE=2           # Demo: 2 min; Prod: 120 min
 CONSULTATION_TIMEOUT_MINUTES=2      # Demo: 2 min; Prod: 30 min
+WEEKLY_INSIGHTS_HOUR=8              # Hour IST to deliver Monday practice report (0–23)
 
 # Integration
 JAMEEL_SCRIBE_URL=                  # Empty = stub mode; set when Jameel API is live
@@ -756,9 +774,35 @@ Current deployment is fully local development. No Dockerfile, no docker-compose,
 - Downloads all doctor audio files from Twilio media URLs (basic auth)
 - Transcribes each file via Groq Whisper (`asyncio.to_thread` — non-blocking)
 - Builds combined consultation transcript with `PATIENT:` / `DOCTOR:` role labels
-- Runs `soap_generator_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (same nodes as single-voice-note scribe, called as plain functions)
+- Runs `soap_generator_node` → `extract_entities_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (same nodes as single-voice-note scribe, called as plain functions)
+- Computes overall confidence + low-confidence section names via `nodes.py` helpers
 - Stores PDF in `generated/scribe_pdfs/`, returns public URL at `/scribe/pdf/{id}`
-- Returns full integration contract response: `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp}`
+- Returns full integration contract response: `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp, clinical_entities, overall_confidence, low_confidence_sections}`
+
+**Clinical entity extractor (`extract_entities_node`):**
+- New LangGraph node inserted between `soap_generator_node` and `grounding_check_node` in both the single-voice-note scribe pipeline and the consultation bundle pipeline
+- System prompt (`ENTITY_EXTRACT_SYSTEM`) includes explicit SECURITY GUARDRAIL to ignore any injection attempts in the transcript
+- Input: full transcript + soap_note context (so entity linking uses clinical reasoning, not only surface text)
+- Output schema: `{"symptoms": [{"name", "severity", "duration"}], "medications": [{"name", "dose", "frequency"}], "diagnoses": [str]}`
+- Stored as `clinical_entities` in `ScribeState` and returned in the scribe API response
+- Hinglish mappings: sir dard→headache, bukhar→fever, dawa→medicine (hardened in system prompt)
+
+**SOAP confidence hardening:**
+- `overall_soap_confidence(soap_note)` — computes mean confidence across all non-missing sections; exported from `nodes.py`
+- `low_confidence_section_names(soap_note)` — returns `["Assessment"]` style list for sections below 0.6; exported from `nodes.py`
+- Threshold: 0.6 (overall mean). Applied in two places:
+  1. `clinical_scribe.py` — single voice note flow: warning appended to the PDF caption/approval text sent to doctor
+  2. `consultation_service.py` — consultation finalization: warning appended to the doctor WhatsApp summary
+- Warning format: `⚠️ Low confidence warning: I am not confident about the [Section] section(s). Please review carefully before sending.`
+- No action taken automatically — the doctor is informed and must decide whether to approve or request more information
+
+**Weekly practice insights:**
+- `_weekly_insights_job(doctor_number)` fires every Monday at `WEEKLY_INSIGHTS_HOUR` IST via APScheduler `CronTrigger(day_of_week="mon")`
+- Aggregates all appointments for the doctor confirmed in the past 7 days
+- Metrics: total, past count, upcoming count, estimated no-shows (heuristic: slot passed + `reminder_sent=True` + no `last_active` activity on/after appointment time), day_counts (Mon–Sun), time slots (Morning/Afternoon/Evening), symptom frequency from `symptoms_mentioned`
+- Sends formatted WhatsApp message to doctor: total, past/upcoming split, no-show rate, busiest day, busiest slot, top 3 complaints
+- Registered at startup: `main.py` lifespan calls `schedule_weekly_insights(doc_num)` for every configured doctor number
+- Controlled by `WEEKLY_INSIGHTS_HOUR` env var (default: 8); override to adjust delivery time
 
 **Scribe API endpoint (`scribe_router.py`):**
 - `POST /scribe/consult` — HTTP interface for the scribe pipeline
@@ -903,7 +947,14 @@ Patient        Twilio        webhook_router      RouterAgent      BookingAgent  
     "soap_note_pdf_url": "https://.../scribe/pdf/{id}",
     "follow_up_questions": ["How are you feeling?", "Are you taking the medicine?"],
     "missing_sections": [],
-    "summary_for_whatsapp": "Suresh | Dx: Hypertension | Rx: Amlodipine 5mg OD"
+    "summary_for_whatsapp": "Suresh | Dx: Hypertension | Rx: Amlodipine 5mg OD",
+    "clinical_entities": {
+      "symptoms":    [{"name": "headache", "severity": "mild", "duration": "2 days"}],
+      "medications": [{"name": "Amlodipine", "dose": "5mg", "frequency": "once daily"}],
+      "diagnoses":   ["Hypertension stage 1"]
+    },
+    "overall_confidence": 0.86,
+    "low_confidence_sections": []
   }
   ```
 - Purpose: Full consultation-to-SOAP pipeline. Downloads + transcribes audio, generates SOAP note, returns PDF URL.
@@ -967,21 +1018,25 @@ main.py
 │   │       │   ├── app.services.store
 │   │       │   ├── app.services.whatsapp
 │   │       │   └── app.services.scribe_service  ← lazy import (when JAMEEL_SCRIBE_URL empty)
-│   │       │       ├── app.graph.scribe.nodes (Groq Whisper, LLaMA)
+│   │       │       ├── app.graph.scribe.nodes (soap_generator_node, extract_entities_node,
+│   │       │       │     grounding_check_node, followup_generator_node, pdf_output_node,
+│   │       │       │     overall_soap_confidence, low_confidence_section_names)
 │   │       │       ├── app.graph.scribe.pdf_builder (ReportLab)
 │   │       │       ├── app.services.clinical_scribe (store_scribe_pdf)
 │   │       │       └── app.services.identity (find_doctor_name)
 │   │       └── app.schemas (ConsultationSession, ConsultationMessage)
 │   │
 │   ├── app.services.clinical_scribe
-│   │   ├── app.graph.scribe.pipeline
-│   │   │   ├── app.graph.scribe.nodes (Whisper, Groq)
+│   │   ├── app.graph.scribe.pipeline (scribe_pipeline)
+│   │   │   ├── app.graph.scribe.nodes (transcribe, soap, extract_entities, grounding, followup, pdf)
 │   │   │   ├── app.graph.scribe.state
 │   │   │   └── app.graph.scribe.pdf_builder (ReportLab)
+│   │   ├── app.graph.scribe.nodes (overall_soap_confidence, low_confidence_section_names)
 │   │   ├── app.services.store
 │   │   ├── app.services.whatsapp
 │   │   └── app.services.soap_approval
-│   │       └── app.services.store
+│   │       ├── app.services.store
+│   │       └── app.services.scheduler (schedule_followup_message)
 │   │
 │   ├── app.services.pdf_service
 │   │   ├── app.graph.parser.pipeline
@@ -1044,8 +1099,8 @@ All `GET /debug/*` endpoints are publicly accessible. They return full session d
 **7. Multi-intent handling partially implemented**
 `classifier_graph` returns `all_intents` and `is_multi_intent=True` when multiple intents are detected. `router.py` `route_after_session()` only routes on the primary (highest confidence) intent. Secondary intents are discarded.
 
-**8. Follow-up questions not delivered to patient**
-`finalize_and_send()` receives `follow_up_questions` from Jameel's stub/API and attaches them to the doctor summary, but does NOT send them to the patient or schedule a follow-up message. `FollowUpAgent` responds to `followup_query` intent but has no proactive delivery mechanism.
+**8. Follow-up message scheduling — single-voice-note path complete, consultation path pending**
+In the single-voice-note scribe path: after the doctor approves via `soap_approval._approve()`, `_schedule_followup()` calls `schedule_followup_message()` in `scheduler.py` to send a scheduled follow-up check-in to the patient. In the consultation finalization path (`finalize_and_send()` in `consultation_service.py`): `follow_up_questions` are included in the doctor WhatsApp summary but a scheduled follow-up message to the patient is not yet dispatched from this path. `FollowUpAgent` responds to reactive `followup_query` intent but has no proactive delivery mechanism for the consultation path.
 
 **9. Lab agent is a stub**
 `lab_agent.py` only handles the case where `lab_report_share` intent fires but no PDF is attached. The actual `pdf_service.handle_incoming_pdf()` is called directly in `webhook_router.py` for PDF attachments and bypasses the router entirely.
@@ -1111,4 +1166,4 @@ After every successful routing, `webhook_router.py` saves `reply_message[:300]` 
 
 ---
 
-*Report generated from live codebase. Verified against actual file contents at `D:\ClinicAI` on 2026-05-27.*
+*Report generated from live codebase. Verified against actual file contents at `D:\ClinicAI` on 2026-05-29. Sprint 2 is complete — all Nabil and Jameel deliverables implemented.*

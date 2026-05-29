@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     if scheduler is not None:
         if not getattr(scheduler, "running", False):
             scheduler.start()
-        print("  APScheduler ready — reminder + consultation timeout + after-hours flush jobs available")
+        print("  APScheduler ready — reminder + consultation timeout + after-hours flush + weekly insights jobs available")
 
         # Register after-hours flush for all configured doctors
         try:
@@ -58,6 +58,14 @@ async def lifespan(app: FastAPI):
                 schedule_afterhours_flush(doc_num)
         except Exception as _exc:
             print(f"  [WARN] After-hours flush registration failed: {_exc}")
+
+        # Register weekly insights for all configured doctors
+        try:
+            from app.services.scheduler import schedule_weekly_insights
+            for doc_num in all_doctor_numbers():
+                schedule_weekly_insights(doc_num)
+        except Exception as _exc:
+            print(f"  [WARN] Weekly insights registration failed: {_exc}")
     else:
         print("  APScheduler not configured — scheduler module not found")
 

@@ -17,6 +17,7 @@ FOLLOWUP_DEFAULT_DAYS = int(os.getenv("FOLLOWUP_DEFAULT_DAYS", "2"))  # days if 
 _DEMO_FOLLOWUP_DELAY = os.getenv("DEMO_FOLLOWUP_DELAY_MINUTES", "").strip()  # e.g. "3" for demo
 _TZ_NAME = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata")
 _CLINIC_OPEN_HOUR = int(os.getenv("CLINIC_OPEN_HOUR", "9"))
+_WEEKLY_INSIGHTS_HOUR = int(os.getenv("WEEKLY_INSIGHTS_HOUR", "8"))
 
 _MONTHS = {
     "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
@@ -428,4 +429,160 @@ def schedule_followup_message(
         id=f"followup_{patient_number}",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+
+# ── Weekly practice insights ───────────────────────────────────────────────────
+
+def _weekly_insights_job(doctor_number: str) -> None:
+    """Runs every Monday at WEEKLY_INSIGHTS_HOUR — sends 7-day practice summary to the doctor."""
+    from app.services.store import all_appointments, get_last_active
+    from app.services.whatsapp import send_whatsapp_message_sync
+    from app.services.identity import find_doctor_name
+
+    tz = ZoneInfo(_TZ_NAME)
+    now = datetime.now(tz)
+    week_ago = now - timedelta(days=7)
+    clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
+
+    doctor_name = find_doctor_name(doctor_number) or doctor_number
+    dr_label = _strip_dr_prefix(doctor_name)
+
+    # Collect all appointments, filter to this doctor + booked in past 7 days
+    all_appts_raw = all_appointments()
+    recent: list[dict] = []
+    for appt_data in all_appts_raw.values():
+        if not isinstance(appt_data, dict):
+            continue
+        appt_doctor = appt_data.get("doctor_name", "")
+        if not (
+            appt_doctor.lower() in doctor_name.lower()
+            or doctor_name.lower() in appt_doctor.lower()
+        ):
+            continue
+        try:
+            confirmed_raw = appt_data.get("confirmed_at")
+            if not confirmed_raw:
+                continue
+            confirmed_dt = datetime.fromisoformat(str(confirmed_raw))
+            if confirmed_dt.tzinfo is None:
+                confirmed_dt = confirmed_dt.replace(tzinfo=tz)
+            if confirmed_dt >= week_ago:
+                recent.append(appt_data)
+        except (ValueError, TypeError):
+            continue
+
+    total = len(recent)
+
+    if total == 0:
+        msg = (
+            f"📊 *{clinic_name} — Weekly Practice Insights*\n"
+            f"*Dr. {dr_label}* | {week_ago.strftime('%d %b')} – {now.strftime('%d %b %Y')}\n\n"
+            "No appointments were booked this week.\n\n"
+            "Have a great week! 🙏"
+        )
+        send_whatsapp_message_sync(doctor_number, msg)
+        print(f"[WeeklyInsights] Sent (0 appointments) to {doctor_number}")
+        return
+
+    # Aggregate metrics
+    day_counts: dict[str, int] = {}
+    time_slots: dict[str, int] = {}
+    symptom_counts: dict[str, int] = {}
+    past_count = 0
+    no_show_count = 0
+
+    for appt in recent:
+        appt_dt = _resolve_appointment_datetime(
+            appt.get("date_str", ""), appt.get("time_str", "")
+        )
+
+        if appt_dt:
+            # Day distribution
+            day_name = appt_dt.strftime("%A")
+            day_counts[day_name] = day_counts.get(day_name, 0) + 1
+
+            # Time-of-day distribution
+            hour = appt_dt.hour
+            if hour < 12:
+                slot = "Morning (before 12pm)"
+            elif hour < 17:
+                slot = "Afternoon (12–5pm)"
+            else:
+                slot = "Evening (after 5pm)"
+            time_slots[slot] = time_slots.get(slot, 0) + 1
+
+            # Past appointment analysis
+            # Add 90 min buffer so appointment slot has clearly passed
+            if appt_dt + timedelta(minutes=90) < now:
+                past_count += 1
+                # No-show proxy: appointment passed + reminder was sent (reminder fired
+                # ~2h before, so doctor's reminder system was active) but patient was
+                # NOT active after the appointment time.
+                from_number = appt.get("from_number", "")
+                if appt.get("reminder_sent") and from_number:
+                    last_active = get_last_active(from_number)
+                    if last_active is None or last_active < appt_dt:
+                        no_show_count += 1
+
+        # Symptom aggregation
+        for sym in appt.get("symptoms") or []:
+            if sym:
+                sym_clean = sym.strip()
+                if sym_clean:
+                    symptom_counts[sym_clean] = symptom_counts.get(sym_clean, 0) + 1
+
+    # Build WhatsApp message
+    lines = [
+        f"📊 *{clinic_name} — Weekly Practice Insights*",
+        f"*Dr. {dr_label}* | {week_ago.strftime('%d %b')} – {now.strftime('%d %b %Y')}",
+        "",
+        f"📅 *Total appointments booked:* {total}",
+    ]
+
+    if past_count > 0:
+        upcoming = total - past_count
+        lines.append(f"✅ *Slots already passed:* {past_count}" + (f" | 📆 Upcoming: {upcoming}" if upcoming > 0 else ""))
+
+    if no_show_count > 0:
+        no_show_pct = round(no_show_count / past_count * 100) if past_count else 0
+        lines.append(f"❌ *Estimated no-shows:* {no_show_count} ({no_show_pct}% of past slots)")
+
+    if day_counts:
+        busiest_day = max(day_counts, key=day_counts.get)
+        lines.append(f"🗓️ *Busiest day:* {busiest_day} ({day_counts[busiest_day]} appointments)")
+
+    if time_slots:
+        busiest_slot = max(time_slots, key=time_slots.get)
+        lines.append(f"⏰ *Busiest time:* {busiest_slot}")
+
+    if symptom_counts:
+        top3 = sorted(symptom_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        sym_text = ", ".join(f"{s} ({n})" for s, n in top3)
+        lines.append(f"🤒 *Top complaints:* {sym_text}")
+
+    lines += ["", "Have a great week! 🙏"]
+
+    msg = "\n".join(lines)
+    send_whatsapp_message_sync(doctor_number, msg)
+    print(f"[WeeklyInsights] Sent to {doctor_number} — {total} appointments, {no_show_count} no-shows")
+
+
+def schedule_weekly_insights(doctor_number: str) -> None:
+    """Register weekly insights cron job — every Monday at WEEKLY_INSIGHTS_HOUR IST."""
+    scheduler.add_job(
+        func=_weekly_insights_job,
+        trigger=CronTrigger(
+            day_of_week="mon",
+            hour=_WEEKLY_INSIGHTS_HOUR,
+            minute=0,
+            timezone=_TZ_NAME,
+        ),
+        args=[doctor_number],
+        id=f"weekly_insights_{doctor_number}",
+        replace_existing=True,
+    )
+    print(
+        f"[WeeklyInsights] Scheduled every Monday at "
+        f"{_WEEKLY_INSIGHTS_HOUR:02d}:00 IST for {doctor_number}"
     )

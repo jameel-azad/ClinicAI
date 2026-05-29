@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+from app.graph.scribe.nodes import overall_soap_confidence, low_confidence_section_names
 from app.graph.scribe.pipeline import scribe_pipeline
 from app.graph.scribe.state import ScribeState
 from app.services.store import all_appointments
@@ -94,6 +95,21 @@ async def handle_doctor_voice_note(
             "follow_up_days": follow_up_days,
         })
 
+        # ── Confidence check ──────────────────────────────────────────────────
+        soap_note = result.get("soap_note", {})
+        overall_conf = overall_soap_confidence(soap_note)
+        low_conf = low_confidence_section_names(soap_note)
+
+        if overall_conf < 0.6 and low_conf:
+            sections_str = ", ".join(f"[{s}]" for s in low_conf)
+            confidence_notice = (
+                f"\n\n⚠️ *Low confidence warning:* I am not confident about the "
+                f"{sections_str} section(s). Please review carefully before sending."
+            )
+        else:
+            confidence_notice = ""
+        # ─────────────────────────────────────────────────────────────────────
+
         public_url = _public_pdf_url(document_id)
         soap_content_sid = os.getenv("SOAP_APPROVAL_CONTENT_SID", "").strip()
 
@@ -101,7 +117,10 @@ async def handle_doctor_voice_note(
             # ── Button flow ──────────────────────────────────────────────────────
             # 1. Send the PDF so the doctor can read it
             if public_url:
-                pdf_caption = f"📋 Prescription note for {patient_name or 'patient'} — review before approving."
+                pdf_caption = (
+                    f"📋 Prescription note for {patient_name or 'patient'} — review before approving."
+                    f"{confidence_notice}"
+                )
                 send_whatsapp_media_sync(doctor_number, pdf_caption, public_url)
 
             # 2. Send the approval buttons via Content Template
@@ -122,6 +141,7 @@ async def handle_doctor_voice_note(
                     "Review the PDF and reply:\n"
                     f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
                     f"❌ *REJECT {soap_id}* — discards the note"
+                    f"{confidence_notice}"
                 )
             else:
                 approval_msg = (
@@ -130,6 +150,7 @@ async def handle_doctor_voice_note(
                     f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
                     f"❌ *REJECT {soap_id}* — discards the note\n\n"
                     "💡 Include the patient's WhatsApp number after APPROVE."
+                    f"{confidence_notice}"
                 )
             if public_url:
                 send_whatsapp_media_sync(doctor_number, approval_msg, public_url)

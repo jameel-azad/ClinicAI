@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 
 from app.graph.scribe.nodes import (
     extract_entities_node,
+    fhir_coding_node,
     soap_generator_node,
     grounding_check_node,
     followup_generator_node,
@@ -114,6 +115,7 @@ async def process_consultation_bundle(bundle: dict) -> dict:
 
     state = {**state, **soap_generator_node(state)}
     state = {**state, **extract_entities_node(state)}
+    state = {**state, **fhir_coding_node(state)}
     state = {**state, **grounding_check_node(state)}
     state = {**state, **followup_generator_node(state)}
     state = {**state, **pdf_output_node(state)}
@@ -148,6 +150,9 @@ async def process_consultation_bundle(bundle: dict) -> dict:
         "clinical_entities": state.get("clinical_entities") or {"symptoms": [], "medications": [], "diagnoses": []},
         "overall_confidence": overall_soap_confidence(soap_note),
         "low_confidence_sections": low_confidence_section_names(soap_note),
+        "fhir_bundle": state.get("fhir_bundle") or {},
+        "snomed_mappings": state.get("snomed_mappings") or [],
+        "fhir_validation_errors": state.get("fhir_validation_errors") or [],
     }
 
 

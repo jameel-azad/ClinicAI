@@ -135,6 +135,8 @@ def build_soap_pdf(
     doctor_name: str = "",
     patient_name: str = "",
     clinic_name: str = "",
+    snomed_mappings: list | None = None,
+    fhir_bundle: dict | None = None,
 ) -> None:
     """Build and save the SOAP note PDF to output_path."""
 
@@ -268,6 +270,87 @@ def build_soap_pdf(
         block.append(Spacer(1, 3 * mm))
 
         story.append(KeepTogether(block))
+
+    # -----------------------------------------------------------------------
+    # FHIR R4 / SNOMED CT coded clinical data
+    # -----------------------------------------------------------------------
+    _snomed = snomed_mappings or []
+    _fhir_entries = (fhir_bundle or {}).get("entry", [])
+    _condition_rows = [m for m in _snomed if m.get("fhir_resource_type") == "Condition"]
+    _med_resources = [
+        e["resource"] for e in _fhir_entries
+        if e.get("resource", {}).get("resourceType") == "MedicationRequest"
+    ]
+
+    if _condition_rows or _med_resources:
+        story.append(Spacer(1, 3 * mm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=BRAND_BLUE))
+        story.append(Spacer(1, 2 * mm))
+        story.append(Paragraph("FHIR R4 CODED CLINICAL DATA", styles["appendix_header"]))
+
+        if _condition_rows:
+            story.append(Paragraph(
+                "Diagnoses & Symptoms — SNOMED CT",
+                ParagraphStyle("fhir_sub", fontSize=9, fontName="Helvetica-Bold",
+                               textColor=BRAND_BLUE, spaceAfter=2),
+            ))
+            snomed_data = [["Clinical Term", "SNOMED CT ID", "Fully Specified Name"]]
+            for entry in _condition_rows:
+                snomed_data.append([
+                    Paragraph(str(entry.get("clinical_term", ""))[:50], styles["appendix_body"]),
+                    Paragraph(str(entry.get("snomed_concept_id", "")), styles["appendix_body"]),
+                    Paragraph(str(entry.get("snomed_fsn", ""))[:70], styles["appendix_body"]),
+                ])
+            col_w = page_w - 2 * margin
+            snomed_table = Table(snomed_data, colWidths=[col_w * 0.30, col_w * 0.20, col_w * 0.50])
+            snomed_table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("BACKGROUND", (0, 0), (-1, 0), BRAND_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT_BLUE]),
+                ("BOX", (0, 0), (-1, -1), 0.4, BRAND_BLUE),
+                ("INNERGRID", (0, 0), (-1, -1), 0.2, GREY),
+                ("PADDING", (0, 0), (-1, -1), 4),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(snomed_table)
+            story.append(Spacer(1, 3 * mm))
+
+        if _med_resources:
+            story.append(Paragraph(
+                "Medications — RxNorm",
+                ParagraphStyle("fhir_sub2", fontSize=9, fontName="Helvetica-Bold",
+                               textColor=BRAND_BLUE, spaceAfter=2),
+            ))
+            med_data = [["Drug Name", "RxNorm Code", "Dose / Frequency"]]
+            for res in _med_resources:
+                med_concept = res.get("medicationCodeableConcept", {})
+                codings = med_concept.get("coding", [{}])
+                code = codings[0].get("code", "") if codings else ""
+                display = med_concept.get("text") or (codings[0].get("display", "") if codings else "")
+                dosage_list = res.get("dosageInstruction", [{}])
+                dosage_text = dosage_list[0].get("text", "") if dosage_list else ""
+                med_data.append([
+                    Paragraph(str(display)[:40], styles["appendix_body"]),
+                    Paragraph(str(code), styles["appendix_body"]),
+                    Paragraph(str(dosage_text)[:45], styles["appendix_body"]),
+                ])
+            col_w = page_w - 2 * margin
+            med_table = Table(med_data, colWidths=[col_w * 0.40, col_w * 0.20, col_w * 0.40])
+            med_table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("BACKGROUND", (0, 0), (-1, 0), BRAND_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT_BLUE]),
+                ("BOX", (0, 0), (-1, -1), 0.4, BRAND_BLUE),
+                ("INNERGRID", (0, 0), (-1, -1), 0.2, GREY),
+                ("PADDING", (0, 0), (-1, -1), 4),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(med_table)
+            story.append(Spacer(1, 3 * mm))
 
     # -----------------------------------------------------------------------
     # Ungrounded flags summary

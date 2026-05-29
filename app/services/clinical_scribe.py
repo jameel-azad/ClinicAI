@@ -93,6 +93,11 @@ async def handle_doctor_voice_note(
             "doctor_number": doctor_number,
             "follow_up_questions": follow_up_questions,
             "follow_up_days": follow_up_days,
+            # Stored for REGEN support — allows re-running pipeline without re-transcribing audio
+            "transcript": result.get("transcript", ""),
+            "clinical_entities": result.get("clinical_entities") or {},
+            "fhir_bundle": result.get("fhir_bundle") or {},
+            "snomed_mappings": result.get("snomed_mappings") or [],
         })
 
         # ── Confidence check ──────────────────────────────────────────────────
@@ -135,20 +140,28 @@ async def handle_doctor_voice_note(
             )
         else:
             # ── Text fallback (no template configured) ───────────────────────────
+            fhir_summary = _format_fhir_whatsapp_summary(
+                result.get("snomed_mappings") or [],
+                result.get("fhir_bundle") or {},
+            )
             if patient_number:
                 approval_msg = (
                     f"📋 Prescription note ready for *{patient_name or 'patient'}*.\n\n"
-                    "Review the PDF and reply:\n"
+                    + fhir_summary
+                    + "Review the PDF and reply:\n"
                     f"✅ *APPROVE {soap_id}* — sends to {patient_number}\n"
-                    f"❌ *REJECT {soap_id}* — discards the note"
+                    f"❌ *REJECT {soap_id}* — discards the note\n"
+                    f"🔄 *REGEN {soap_id} <correction>* — regenerates with your feedback"
                     f"{confidence_notice}"
                 )
             else:
                 approval_msg = (
                     "📋 Prescription note generated — patient could not be identified automatically.\n\n"
-                    "Review the PDF and reply:\n"
+                    + fhir_summary
+                    + "Review the PDF and reply:\n"
                     f"✅ *APPROVE {soap_id} +PATIENT_NUMBER* — sends to the specified number\n"
-                    f"❌ *REJECT {soap_id}* — discards the note\n\n"
+                    f"❌ *REJECT {soap_id}* — discards the note\n"
+                    f"🔄 *REGEN {soap_id} <correction>* — regenerates with your feedback\n\n"
                     "💡 Include the patient's WhatsApp number after APPROVE."
                     f"{confidence_notice}"
                 )
@@ -337,6 +350,32 @@ def _try_buffer_doctor_audio(media_url: str, doctor_number: str) -> str | None:
     except Exception as exc:
         print(f"[Scribe] _try_buffer_doctor_audio: {exc}")
     return None
+
+
+def _format_fhir_whatsapp_summary(snomed_mappings: list, fhir_bundle: dict) -> str:
+    """Build a compact SNOMED+RxNorm summary for the doctor's WhatsApp approval message."""
+    lines = []
+    if snomed_mappings:
+        lines.append("*Coded Diagnoses (SNOMED CT):*")
+        for m in snomed_mappings[:4]:
+            term = m.get("clinical_term", "")
+            code = m.get("snomed_concept_id", "")
+            if term:
+                lines.append(f"  • {term}" + (f" [{code}]" if code and code != "UNKNOWN" else ""))
+    med_resources = [
+        e["resource"] for e in fhir_bundle.get("entry", [])
+        if e.get("resource", {}).get("resourceType") == "MedicationRequest"
+    ]
+    if med_resources:
+        lines.append("*Medications (RxNorm):*")
+        for res in med_resources[:4]:
+            med = res.get("medicationCodeableConcept", {})
+            codings = med.get("coding", [{}])
+            code = codings[0].get("code", "") if codings else ""
+            text = med.get("text") or (codings[0].get("display", "") if codings else "")
+            if text:
+                lines.append(f"  • {text}" + (f" [{code}]" if code and code != "UNKNOWN" else ""))
+    return "\n".join(lines) + "\n\n" if lines else ""
 
 
 def _is_supported_audio(media_content_type: str | None) -> bool:

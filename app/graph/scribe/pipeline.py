@@ -2,6 +2,7 @@ from langgraph.graph import END, StateGraph
 
 from app.graph.scribe.nodes import (
     extract_entities_node,
+    fhir_coding_node,
     followup_generator_node,
     grounding_check_node,
     pdf_output_node,
@@ -17,6 +18,7 @@ def build_scribe_pipeline():
     graph.add_node("transcribe", transcribe_node)
     graph.add_node("soap_generator", soap_generator_node)
     graph.add_node("extract_entities", extract_entities_node)
+    graph.add_node("fhir_coding", fhir_coding_node)
     graph.add_node("grounding_check", grounding_check_node)
     graph.add_node("followup_generator", followup_generator_node)
     graph.add_node("pdf_output", pdf_output_node)
@@ -24,7 +26,8 @@ def build_scribe_pipeline():
     graph.set_entry_point("transcribe")
     graph.add_edge("transcribe", "soap_generator")
     graph.add_edge("soap_generator", "extract_entities")
-    graph.add_edge("extract_entities", "grounding_check")
+    graph.add_edge("extract_entities", "fhir_coding")
+    graph.add_edge("fhir_coding", "grounding_check")
     graph.add_edge("grounding_check", "followup_generator")
     graph.add_edge("followup_generator", "pdf_output")
     graph.add_edge("pdf_output", END)

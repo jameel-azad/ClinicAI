@@ -30,5 +30,8 @@ class ScribeState(TypedDict, total=False):
     follow_up_days: Optional[int]      # days until follow-up (None = not mentioned by doctor)
     summary_for_whatsapp: Optional[str]  # <300 chars for WhatsApp delivery to doctor
     clinical_entities: Optional[dict]   # {symptoms:[...], medications:[...], diagnoses:[...]}
+    fhir_bundle: Optional[dict]         # HL7 FHIR R4 Bundle resource (collection)
+    snomed_mappings: Optional[list]     # [{clinical_term, snomed_concept_id, snomed_fsn, fhir_resource_type}]
+    fhir_validation_errors: list[str]  # structural FHIR validation failures (non-blocking)
     pdf_path: str
     errors: list[str]

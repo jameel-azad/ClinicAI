@@ -13,6 +13,8 @@ import os
 import re
 import tempfile
 import time
+import uuid as _uuid
+from datetime import datetime as _dt
 from typing import Any
 
 from dotenv import load_dotenv
@@ -590,6 +592,273 @@ def extract_entities_node(state: ScribeState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node 4b: fhir_coding_node  (inserted after extract_entities, before grounding_check)
+# ---------------------------------------------------------------------------
+
+def _validate_fhir_bundle(bundle: dict) -> list[str]:
+    """Lightweight structural validator for a FHIR R4 Bundle. Returns error strings."""
+    if not bundle:
+        return ["Empty FHIR bundle"]
+    errors: list[str] = []
+    if bundle.get("resourceType") != "Bundle":
+        errors.append(f"resourceType must be 'Bundle', got '{bundle.get('resourceType')}'")
+    if bundle.get("type") != "collection":
+        errors.append(f"Bundle.type must be 'collection', got '{bundle.get('type')}'")
+    for i, entry in enumerate(bundle.get("entry", [])):
+        resource = entry.get("resource", {})
+        rt = resource.get("resourceType")
+        if not resource.get("id"):
+            errors.append(f"entry[{i}].resource.id is missing")
+        if rt == "Condition":
+            if not resource.get("code", {}).get("coding"):
+                errors.append(f"entry[{i}] Condition.code.coding is missing")
+            if not resource.get("clinicalStatus"):
+                errors.append(f"entry[{i}] Condition.clinicalStatus is missing")
+            if not resource.get("subject"):
+                errors.append(f"entry[{i}] Condition.subject is missing")
+        elif rt == "MedicationRequest":
+            if not resource.get("medicationCodeableConcept", {}).get("coding"):
+                errors.append(f"entry[{i}] MedicationRequest.medicationCodeableConcept.coding is missing")
+            if not resource.get("status"):
+                errors.append(f"entry[{i}] MedicationRequest.status is missing")
+            if not resource.get("intent"):
+                errors.append(f"entry[{i}] MedicationRequest.intent is missing")
+            if not resource.get("subject"):
+                errors.append(f"entry[{i}] MedicationRequest.subject is missing")
+    return errors
+
+
+# Frequency abbreviation → (FHIR GTSAbbreviation code, display)
+_FREQUENCY_MAP: dict[str, tuple[str, str]] = {
+    "od": ("QD", "Once daily"),
+    "qd": ("QD", "Once daily"),
+    "once daily": ("QD", "Once daily"),
+    "bd": ("BID", "Twice daily"),
+    "bid": ("BID", "Twice daily"),
+    "twice daily": ("BID", "Twice daily"),
+    "tds": ("TID", "Three times daily"),
+    "tid": ("TID", "Three times daily"),
+    "thrice daily": ("TID", "Three times daily"),
+    "three times daily": ("TID", "Three times daily"),
+    "sos": ("PRN", "As needed"),
+    "prn": ("PRN", "As needed"),
+    "as needed": ("PRN", "As needed"),
+}
+
+
+def _parse_dose(dose_str: str) -> tuple[float, str]:
+    """Parse '5mg' → (5.0, 'mg'), '500 mg' → (500.0, 'mg'), '' → (1.0, 'tablet')."""
+    m = re.match(r"([\d.]+)\s*([a-zA-Z]+)?", (dose_str or "").strip())
+    if m:
+        return float(m.group(1)), (m.group(2) or "tablet")
+    return 1.0, "tablet"
+
+
+def _build_condition_entry(term: str, coding: dict, now_date: str) -> dict:
+    return {
+        "resource": {
+            "resourceType": "Condition",
+            "id": str(_uuid.uuid4()),
+            "clinicalStatus": {
+                "coding": [{
+                    "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+                    "code": "active",
+                    "display": "Active",
+                }]
+            },
+            "verificationStatus": {
+                "coding": [{
+                    "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+                    "code": "unconfirmed",
+                    "display": "Unconfirmed",
+                }]
+            },
+            "code": {
+                "coding": [{
+                    "system": coding["system"],
+                    "code": coding["concept_id"],
+                    "display": coding["fsn"],
+                }],
+                "text": term,
+            },
+            "subject": {"reference": "Patient/unknown"},
+            "recordedDate": now_date,
+        }
+    }
+
+
+def _build_medication_request_entry(
+    name: str, dose: str, frequency: str, coding: dict, now_date: str
+) -> dict:
+    freq_key = (frequency or "").lower().strip()
+    fhir_code, fhir_display = _FREQUENCY_MAP.get(freq_key, ("", frequency))
+    dose_value, dose_unit = _parse_dose(dose)
+    dosage_text = f"{dose} {frequency}".strip()
+
+    dosage_instruction: dict = {
+        "text": dosage_text,
+        "doseAndRate": [{
+            "doseQuantity": {
+                "value": dose_value,
+                "unit": dose_unit,
+                "system": "http://unitsofmeasure.org",
+            }
+        }],
+    }
+    if fhir_code:
+        dosage_instruction["timing"] = {
+            "code": {
+                "coding": [{
+                    "system": "http://terminology.hl7.org/CodeSystem/v3-GTSAbbreviation",
+                    "code": fhir_code,
+                    "display": fhir_display,
+                }]
+            }
+        }
+
+    return {
+        "resource": {
+            "resourceType": "MedicationRequest",
+            "id": str(_uuid.uuid4()),
+            "status": "active",
+            "intent": "order",
+            "medicationCodeableConcept": {
+                "coding": [{
+                    "system": coding["system"],
+                    "code": coding["rxcui"],
+                    "display": coding["display"],
+                }],
+                "text": name,
+            },
+            "subject": {"reference": "Patient/unknown"},
+            "dosageInstruction": [dosage_instruction],
+            "authoredOn": now_date,
+        }
+    }
+
+
+def fhir_coding_node(state: ScribeState) -> dict:
+    """
+    Build an HL7 FHIR R4 Bundle by looking up SNOMED CT and RxNorm codes
+    through the terminology service (local table → NLM API → UNKNOWN).
+
+    No LLM is used here. The LLM extracted entity *names*; this node assigns
+    *codes* from authoritative sources only.
+    Non-blocking: all errors go to fhir_validation_errors, never to errors.
+    """
+    from app.services.terminology import lookup_snomed, lookup_rxnorm
+
+    clinical_entities = state.get("clinical_entities") or {}
+    errors = list(state.get("errors", []))
+    fhir_validation_errors: list[str] = []
+
+    symptoms: list = clinical_entities.get("symptoms", [])
+    medications: list = clinical_entities.get("medications", [])
+    diagnoses: list = clinical_entities.get("diagnoses", [])
+
+    if not symptoms and not medications and not diagnoses:
+        logger.info("[fhir_coding] No clinical entities — skipping FHIR coding")
+        return {
+            "fhir_bundle": {},
+            "snomed_mappings": [],
+            "fhir_validation_errors": [],
+            "errors": errors,
+        }
+
+    now_iso = _dt.now().isoformat()
+    now_date = now_iso[:10]
+    snomed_mappings: list[dict] = []
+    fhir_entries: list[dict] = []
+
+    try:
+        # ── Diagnoses → SNOMED CT Condition resources ─────────────────────────
+        for dx in diagnoses:
+            term = str(dx).strip()
+            if not term:
+                continue
+            coding = lookup_snomed(term)
+            snomed_mappings.append({
+                "clinical_term": term,
+                "snomed_concept_id": coding["concept_id"],
+                "snomed_fsn": coding["fsn"],
+                "fhir_resource_type": "Condition",
+                "source": coding["source"],
+            })
+            fhir_entries.append(_build_condition_entry(term, coding, now_date))
+
+        # ── Symptoms → SNOMED CT Condition resources ───────────────────────────
+        for sx in symptoms:
+            term = (sx["name"] if isinstance(sx, dict) else str(sx)).strip()
+            if not term:
+                continue
+            coding = lookup_snomed(term)
+            snomed_mappings.append({
+                "clinical_term": term,
+                "snomed_concept_id": coding["concept_id"],
+                "snomed_fsn": coding["fsn"],
+                "fhir_resource_type": "Condition",
+                "source": coding["source"],
+            })
+            fhir_entries.append(_build_condition_entry(term, coding, now_date))
+
+        # ── Medications → RxNorm MedicationRequest resources ──────────────────
+        for med in medications:
+            if isinstance(med, dict):
+                name = str(med.get("name", "")).strip()
+                dose = str(med.get("dose", "")).strip()
+                frequency = str(med.get("frequency", "")).strip()
+            else:
+                name, dose, frequency = str(med).strip(), "", ""
+            if not name:
+                continue
+            coding = lookup_rxnorm(name)
+            fhir_entries.append(
+                _build_medication_request_entry(name, dose, frequency, coding, now_date)
+            )
+
+        fhir_bundle: dict = {
+            "resourceType": "Bundle",
+            "id": str(_uuid.uuid4()),
+            "type": "collection",
+            "timestamp": now_iso,
+            "entry": fhir_entries,
+        }
+
+        fhir_validation_errors = _validate_fhir_bundle(fhir_bundle)
+
+        unknown_snomed = sum(1 for m in snomed_mappings if m["snomed_concept_id"] == "UNKNOWN")
+        unknown_rxnorm = sum(
+            1 for e in fhir_entries
+            if e["resource"].get("resourceType") == "MedicationRequest"
+            and e["resource"]["medicationCodeableConcept"]["coding"][0]["code"] == "UNKNOWN"
+        )
+        logger.info(
+            f"[fhir_coding] {len(snomed_mappings)} SNOMED mappings "
+            f"({unknown_snomed} UNKNOWN), "
+            f"{len([e for e in fhir_entries if e['resource'].get('resourceType') == 'MedicationRequest'])} "
+            f"RxNorm entries ({unknown_rxnorm} UNKNOWN), "
+            f"{len(fhir_validation_errors)} validation errors"
+        )
+        return {
+            "fhir_bundle": fhir_bundle,
+            "snomed_mappings": snomed_mappings,
+            "fhir_validation_errors": fhir_validation_errors,
+            "errors": errors,
+        }
+
+    except Exception as e:
+        msg = f"FHIR coding failed: {type(e).__name__}: {e}"
+        logger.warning(f"[fhir_coding] {msg}")
+        fhir_validation_errors.append(msg)
+        return {
+            "fhir_bundle": {},
+            "snomed_mappings": [],
+            "fhir_validation_errors": fhir_validation_errors,
+            "errors": errors,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Node 5: pdf_output_node
 # ---------------------------------------------------------------------------
 
@@ -608,6 +877,8 @@ def pdf_output_node(state: ScribeState) -> dict:
     doctor_name = state.get("doctor_name") or soap_note.get("doctor_name", "")
     patient_name = state.get("patient_name") or soap_note.get("patient_name", "")
     clinic_name = state.get("clinic_name", "")
+    snomed_mappings = state.get("snomed_mappings") or []
+    fhir_bundle = state.get("fhir_bundle") or {}
     errors = list(state.get("errors", []))
 
     try:
@@ -625,6 +896,8 @@ def pdf_output_node(state: ScribeState) -> dict:
             doctor_name=doctor_name,
             patient_name=patient_name,
             clinic_name=clinic_name,
+            snomed_mappings=snomed_mappings,
+            fhir_bundle=fhir_bundle,
         )
 
         logger.info(f"[pdf] Generated SOAP PDF: {pdf_path}")

@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from importlib import import_module
 from typing import Any
@@ -5,6 +6,11 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.auth_router import router as auth_router
+from app.api.clinic_router import router as clinic_router
+from app.api.doctor_api_router import router as doctor_api_router
+from app.api.config_router import router as config_router
 
 
 def _optional_attr(module_name: str, attr_name: str) -> Any | None:
@@ -41,6 +47,15 @@ def _graph_nodes(graph: Any | None) -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create DB tables at startup
+    try:
+        from app.database import engine, Base
+        import app.models  # noqa — registers all models with Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as _exc:
+        print(f"  [WARN] DB table creation failed: {_exc}")
+
     print("=" * 60)
     print("  ClinicAI - Sprint 2 Multi-Agent System")
     print("=" * 60)
@@ -100,12 +115,13 @@ app = FastAPI(
         "Intent classifier, appointment booking, and lab report parser.\n"
     ),
     version="2.0.0",
-    lifespan=lifespan,  
+    lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[os.getenv("DASHBOARD_URL", "http://localhost:3000"), "http://localhost:3000"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -124,7 +140,13 @@ if parser_router is not None:
 if scribe_router is not None:
     app.include_router(scribe_router)
 
+app.include_router(auth_router)
+app.include_router(clinic_router)
+app.include_router(doctor_api_router)
+app.include_router(config_router)
 
+
+@app.get("/health", tags=["Health"])
 @app.get("/", tags=["Health"])
 def health():
     endpoints = {

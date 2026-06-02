@@ -144,6 +144,26 @@ async def finalize_and_send(patient_number: str) -> str:
     delete_consultation(patient_number)
     print(f"[ConsultationService] ConsultationSession deleted for {patient_number}")
 
+    # Persist medical record to PostgreSQL (non-blocking — failure must not affect WhatsApp flow)
+    try:
+        from app.services.patient_service import save_consultation_record
+        from app.services.clinic_resolver import resolve_clinic_by_twilio_number
+        # Resolve clinic from booking session's "to" number
+        booking = get_session(patient_number)
+        clinic_id = getattr(booking, "clinic_id", None) if booking else None
+        if clinic_id:
+            import asyncio
+            asyncio.create_task(save_consultation_record(
+                clinic_id=clinic_id,
+                patient_phone=patient_number,
+                patient_name=getattr(booking, "patient_name", None) if booking else None,
+                doctor_phone=session.doctor_number,
+                chief_complaint=getattr(booking, "symptoms", None) if booking else None,
+                soap_result=result,
+            ))
+    except Exception as _exc:
+        print(f"[ConsultationService] Non-fatal: failed to save patient record: {_exc}")
+
     return (
         "Your consultation has been recorded. "
         "The doctor will send any prescriptions or follow-up instructions shortly. 🙏"

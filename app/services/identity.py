@@ -99,3 +99,65 @@ def find_doctor_number(doctor_name: str | None = None) -> str | None:
 
 def find_doctor_name(doctor_number: str) -> str | None:
     return _doctor_numbers_from_env().get(normalize_whatsapp_number(doctor_number))
+
+
+async def is_doctor_from_db(phone_number: str) -> tuple[bool, str | None]:
+    """
+    Check if phone_number matches a Doctor row in any active clinic.
+    Returns (is_doctor, doctor_name).
+    Used as a fallback when the number is NOT in DOCTOR_WHATSAPP_NUMBERS env var.
+    """
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.doctor import Doctor
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as db:
+            # Normalize the phone: strip "whatsapp:" prefix
+            clean = phone_number.replace("whatsapp:", "").strip()
+            # Try exact match and whatsapp: prefixed match
+            result = await db.execute(
+                select(Doctor).where(
+                    Doctor.is_active == True,
+                    Doctor.whatsapp_number.in_([phone_number, f"whatsapp:{clean}", clean])
+                )
+            )
+            doctor = result.scalar_one_or_none()
+            if doctor:
+                return True, doctor.name
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("[identity] DB doctor lookup failed: %s", exc)
+    return False, None
+
+
+async def identify_sender_async(raw_from: str) -> SenderIdentity:
+    """
+    Async version of identify_sender — checks env var first, then DB.
+    Use this in the webhook when possible.
+    """
+    phone_number = normalize_whatsapp_number(raw_from)
+    doctors = _doctor_numbers_from_env()
+    if phone_number in doctors:
+        return SenderIdentity(phone_number=phone_number, role="doctor", display_name=doctors[phone_number])
+    # Fallback: check database
+    is_doc, name = await is_doctor_from_db(phone_number)
+    if is_doc:
+        return SenderIdentity(phone_number=phone_number, role="doctor", display_name=name)
+    return SenderIdentity(phone_number=phone_number, role="patient")
+
+
+async def all_doctor_numbers_async() -> list[str]:
+    """
+    Returns all doctor numbers: env var + active DB doctors.
+    """
+    env_numbers = set(_doctor_numbers_from_env().keys())
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.doctor import Doctor
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Doctor.whatsapp_number).where(Doctor.is_active == True))
+            db_numbers = {normalize_whatsapp_number(r[0]) for r in result.fetchall()}
+            return sorted(env_numbers | db_numbers)
+    except Exception:
+        return sorted(env_numbers)

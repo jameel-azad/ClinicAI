@@ -157,6 +157,7 @@ class BookingSession(BaseModel):
     new_requested_date: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     new_requested_time: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     last_bot_response: Optional[str] = None    # for context-aware classification
+    clinic_id: Optional[str] = None            # resolved from the Twilio "to" number
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

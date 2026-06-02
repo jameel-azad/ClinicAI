@@ -11,6 +11,7 @@ from app.api.auth_router import router as auth_router
 from app.api.clinic_router import router as clinic_router
 from app.api.doctor_api_router import router as doctor_api_router
 from app.api.config_router import router as config_router
+from app.api.patient_router import router as patient_router
 
 
 def _optional_attr(module_name: str, attr_name: str) -> Any | None:
@@ -144,6 +145,7 @@ app.include_router(auth_router)
 app.include_router(clinic_router)
 app.include_router(doctor_api_router)
 app.include_router(config_router)
+app.include_router(patient_router)
 
 
 @app.get("/health", tags=["Health"])

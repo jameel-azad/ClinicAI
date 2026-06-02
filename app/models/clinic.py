@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.patient import Patient
 
 
 class Clinic(Base):
@@ -30,3 +33,4 @@ class Clinic(Base):
     model_config: Mapped[Optional["ModelConfig"]] = relationship(
         "ModelConfig", back_populates="clinic", uselist=False
     )
+    patients: Mapped[List["Patient"]] = relationship(back_populates="clinic")

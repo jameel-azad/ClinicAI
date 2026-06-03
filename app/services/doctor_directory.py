@@ -227,76 +227,76 @@ def _keywords_for_specialty(specialty: str) -> list[str]:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Demo doctor seeding
-# ---------------------------------------------------------------------------
 
-_DEMO_DOCTORS = [
-    {
-        "name": "Dr Aryan Mehta",
-        "specialty": "Cardiology",
-        "working_hours": "Mon-Sat 10 AM-2 PM, 5 PM-8 PM",
-        "appointment_duration_minutes": 30,
-        "buffer_minutes": 5,
-        "doctor_number": "+919900000001",
-        "google_email": "",
-        "calendar_connected": False,
-        "calendar_status": "Not configured",
-    },
-    {
-        "name": "Dr Priya Patel",
-        "specialty": "General Medicine",
-        "working_hours": "Mon-Sun 9 AM-6 PM",
-        "appointment_duration_minutes": 20,
-        "buffer_minutes": 5,
-        "doctor_number": "+919900000002",
-        "google_email": "",
-        "calendar_connected": False,
-        "calendar_status": "Not configured",
-    },
-    {
-        "name": "Dr Rohit Singh",
-        "specialty": "Orthopedics",
-        "working_hours": "Tue-Sat 11 AM-3 PM",
-        "appointment_duration_minutes": 30,
-        "buffer_minutes": 10,
-        "doctor_number": "+919900000003",
-        "google_email": "",
-        "calendar_connected": False,
-        "calendar_status": "Not configured",
-    },
-    {
-        "name": "Dr Sneha Kumar",
-        "specialty": "Diabetology / Endocrinology",
-        "working_hours": "Mon-Fri 10 AM-4 PM",
-        "appointment_duration_minutes": 30,
-        "buffer_minutes": 5,
-        "doctor_number": "+919900000004",
-        "google_email": "",
-        "calendar_connected": False,
-        "calendar_status": "Not configured",
-    },
-    {
-        "name": "Dr Kavita Rao",
-        "specialty": "Gynecology",
-        "working_hours": "Mon-Sat 9 AM-1 PM",
-        "appointment_duration_minutes": 25,
-        "buffer_minutes": 5,
-        "doctor_number": "+919900000005",
-        "google_email": "",
-        "calendar_connected": False,
-        "calendar_status": "Not configured",
-    },
-]
+def sync_doctors_to_store(doctors: list) -> None:
+    """
+    Sync a list of Doctor ORM objects into the Redis/in-memory profile store.
+    Call at startup and after any doctor create/update/delete via the API.
+    """
+    from app.services.store import save_doctor_profile
+
+    for doc in doctors:
+        if not getattr(doc, "is_active", True):
+            continue
+        save_doctor_profile(doc.whatsapp_number, {
+            "name": doc.name,
+            "specialty": doc.specialty,
+            "working_hours": f"Mon-Sat {doc.working_hours_start}:00-{doc.working_hours_end}:00",
+            "appointment_duration_minutes": doc.appointment_duration_minutes,
+            "buffer_minutes": doc.buffer_minutes,
+            "doctor_number": doc.whatsapp_number,
+            "clinic_id": doc.clinic_id,
+        })
+    logger.info(f"[doctor_directory] Synced {len(doctors)} doctor(s) from DB to store")
+
+
+def reset_store_to_db_doctors(doctors: list) -> None:
+    """
+    Called ONCE at startup. Removes any stale/demo doctor profiles from the
+    store that are not in the current DB, then writes the DB doctors in.
+    This clears demo doctors that were seeded in a previous run.
+    """
+    from app.services.store import all_doctor_profiles, save_doctor_profile, _rdel, _PREFIX
+
+    active_numbers = {
+        doc.whatsapp_number
+        for doc in doctors
+        if getattr(doc, "is_active", True)
+    }
+
+    # Remove profiles not in DB
+    existing = all_doctor_profiles()
+    removed = 0
+    for phone in list(existing.keys()):
+        if phone not in active_numbers:
+            try:
+                from app.services.store import _r
+                if _r is not None:
+                    _r.delete(f"{_PREFIX}doctor_profile:{phone}")
+                from app.services.store import _doctor_profiles
+                _doctor_profiles.pop(phone, None)
+            except Exception:
+                pass
+            removed += 1
+
+    # Write DB doctors
+    sync_doctors_to_store(doctors)
+
+    if removed:
+        logger.info(f"[doctor_directory] Removed {removed} stale doctor profile(s) from store")
 
 
 def seed_demo_doctors() -> None:
     """
-    Seed demo doctor profiles into the store at startup.
-    Only seeds a doctor if no profile for that number exists yet.
-    Safe to call on every startup — idempotent.
+    Seed demo doctor profiles ONLY when no real doctors exist in the store.
+    This ensures demo doctors never override dashboard-registered doctors.
     """
-    from app.services.store import get_doctor_profile, save_doctor_profile
+    from app.services.store import get_doctor_profile, save_doctor_profile, all_doctor_profiles
+
+    existing = all_doctor_profiles()
+    if existing:
+        logger.info(f"[doctor_directory] {len(existing)} real doctor(s) in store — skipping demo seed")
+        return
 
     seeded = 0
     for doc in _DEMO_DOCTORS:

@@ -15,8 +15,9 @@ export interface Doctor {
 }
 export interface ModelConfig {
   id: string; clinic_id: string; llm_vendor: string; llm_model: string
-  stt_model: string; groq_key_set: boolean; anthropic_key_set: boolean
-  openai_key_set: boolean; google_key_set: boolean; updated_at: string
+  stt_vendor: string; stt_model: string; updated_at: string
+  groq_api_key_set: boolean; anthropic_api_key_set: boolean
+  openai_api_key_set: boolean; google_api_key_set: boolean
 }
 export interface AuthResponse {
   access_token: string; token_type: string; clinic_id: string; user_id: string

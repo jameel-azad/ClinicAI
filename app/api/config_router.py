@@ -43,6 +43,7 @@ class ModelConfigResponse(BaseModel):
     clinic_id: str
     llm_vendor: str
     llm_model: str
+    stt_vendor: str
     stt_model: str
     groq_api_key_set: bool
     anthropic_api_key_set: bool
@@ -53,6 +54,7 @@ class ModelConfigResponse(BaseModel):
 class ModelConfigUpdateRequest(BaseModel):
     llm_vendor: Optional[str] = Field(None, max_length=20)
     llm_model: Optional[str] = Field(None, max_length=100)
+    stt_vendor: Optional[str] = Field(None, max_length=20)
     stt_model: Optional[str] = Field(None, max_length=100)
     # API key fields — only stored when a non-empty value is provided.
     groq_api_key: Optional[str] = Field(None, description="Plain-text Groq API key; will be encrypted before storage")
@@ -96,6 +98,7 @@ def _config_to_response(cfg: ModelConfig) -> ModelConfigResponse:
         clinic_id=cfg.clinic_id,
         llm_vendor=cfg.llm_vendor,
         llm_model=cfg.llm_model,
+        stt_vendor=cfg.stt_vendor,
         stt_model=cfg.stt_model,
         groq_api_key_set=bool(cfg.groq_api_key_enc),
         anthropic_api_key_set=bool(cfg.anthropic_api_key_enc),
@@ -150,6 +153,8 @@ async def update_model_config(
         cfg.llm_vendor = body.llm_vendor
     if body.llm_model is not None:
         cfg.llm_model = body.llm_model
+    if body.stt_vendor is not None:
+        cfg.stt_vendor = body.stt_vendor
     if body.stt_model is not None:
         cfg.stt_model = body.stt_model
 

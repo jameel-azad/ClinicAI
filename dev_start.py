@@ -22,7 +22,7 @@ def get_ngrok_url(retries: int = 20, delay: float = 1.0) -> str | None:
                     if tunnel.get("proto") == "https":
                         return tunnel["public_url"].rstrip("/")
         except Exception:
-            pass
+            pass 
         print(f"  Waiting for ngrok... ({attempt}/{retries})")
         time.sleep(delay)
     return None

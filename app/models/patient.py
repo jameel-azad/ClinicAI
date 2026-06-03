@@ -2,7 +2,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
-from sqlalchemy import String, Integer, DateTime, JSON, ForeignKey, func, Boolean
+from sqlalchemy import String, Integer, DateTime, JSON, ForeignKey, UniqueConstraint, func, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 if TYPE_CHECKING:
@@ -11,11 +11,13 @@ if TYPE_CHECKING:
 
 class Patient(Base):
     __tablename__ = "patients"
+    __table_args__ = (
+        UniqueConstraint("clinic_id", "phone_number", name="uq_patient_clinic_phone"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     clinic_id: Mapped[str] = mapped_column(String, ForeignKey("clinics.id"), nullable=False, index=True)
     phone_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    # phone_number is unique per clinic — enforced at service layer
 
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     age: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

@@ -254,7 +254,7 @@ function ApiKeyRow({
   const updateKeyMutation = useMutation({
     mutationFn: (key: string) =>
       api
-        .put(`/api/clinics/${clinicId}/config/keys`, { vendor, key })
+        .put(`/api/clinics/${clinicId}/config`, { [`${vendor}_api_key`]: key })
         .then((r) => r.data),
     onSuccess: () => {
       setShowInput(false)
@@ -411,10 +411,10 @@ export default function ConfigPage() {
   const { data: config, isLoading } = useModelConfig(clinicId)
 
   const vendors: { name: string; keySet: boolean }[] = [
-    { name: "groq", keySet: config?.groq_key_set ?? false },
-    { name: "openai", keySet: config?.openai_key_set ?? false },
-    { name: "anthropic", keySet: config?.anthropic_key_set ?? false },
-    { name: "google", keySet: config?.google_key_set ?? false },
+    { name: "groq",      keySet: config?.groq_api_key_set      ?? false },
+    { name: "openai",    keySet: config?.openai_api_key_set    ?? false },
+    { name: "anthropic", keySet: config?.anthropic_api_key_set ?? false },
+    { name: "google",    keySet: config?.google_api_key_set    ?? false },
   ]
 
   return (

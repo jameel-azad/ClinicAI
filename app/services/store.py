@@ -23,6 +23,7 @@ Key schema (all prefixed  clinicai:):
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -143,14 +144,20 @@ _pending_soaps: dict[str, dict] = {}
 _pending_lab_reviews: dict[str, dict] = {}
 _consultations: dict[str, ConsultationSession] = {}
 _after_hours_queues: dict[str, list[dict]] = {}
-_doctor_reply_contexts: dict[str, dict] = {}  # doctor_number → {patient_number, patient_name}
+_doctor_reply_contexts: dict[str, list[dict]] = {}  # doctor_number → queue (most-recent-first)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION STORE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_session(from_number: str) -> Optional[BookingSession]:
+def get_session(from_number: str, clinic_id: str | None = None) -> Optional[BookingSession]:
+    # Prefer clinic-scoped key (multi-tenant isolation) when clinic_id is known
+    if clinic_id:
+        data = _rget(_key(f"session:{clinic_id}:{from_number}"))
+        if data:
+            return BookingSession.model_validate(data)
+    # Fall back to legacy unscoped key (background jobs without clinic context)
     data = _rget(_key(f"session:{from_number}"))
     if data:
         return BookingSession.model_validate(data)
@@ -159,11 +166,18 @@ def get_session(from_number: str) -> Optional[BookingSession]:
 
 def save_session(session: BookingSession) -> None:
     session.updated_at = datetime.now()
-    _rset(_key(f"session:{session.from_number}"), session.model_dump(), _TTL_SESSION)
+    data = session.model_dump()
+    if session.clinic_id:
+        # Write clinic-scoped key — primary for webhook path (isolated per clinic)
+        _rset(_key(f"session:{session.clinic_id}:{session.from_number}"), data, _TTL_SESSION)
+    # Also write legacy key so background jobs (scheduler, follow-ups) can find the session
+    _rset(_key(f"session:{session.from_number}"), data, _TTL_SESSION)
     _sessions[session.from_number] = session
 
 
-def delete_session(from_number: str) -> None:
+def delete_session(from_number: str, clinic_id: str | None = None) -> None:
+    if clinic_id:
+        _rdel(_key(f"session:{clinic_id}:{from_number}"))
     _rdel(_key(f"session:{from_number}"))
     _sessions.pop(from_number, None)
 
@@ -212,11 +226,59 @@ def get_appointments_by_number(from_number: str) -> list[AppointmentRecord]:
     return [a for a in _appointments.values() if a.from_number == from_number]
 
 
+def _parse_appt_datetime(date_str: str, time_str: str) -> Optional[datetime]:
+    """Best-effort parse of appointment date + time strings into a naive datetime.
+    Used to sort appointments by scheduled time rather than booking-confirmation time.
+    """
+    import re as _re
+    _M = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    d = (date_str or "").lower().strip()
+    now = datetime.now()
+    try:
+        if d in {"today", "aaj"}:
+            base = now.date()
+        elif d in {"tomorrow", "kal"}:
+            from datetime import timedelta as _td
+            base = (now + _td(days=1)).date()
+        else:
+            day_m = _re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", d)
+            mon_m = _re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b", d)
+            if not day_m or not mon_m:
+                return None
+            yr_m = _re.search(r"\b(20\d{2})\b", d)
+            year = int(yr_m.group(1)) if yr_m else now.year
+            from datetime import date as _date
+            base = _date(year, _M[mon_m.group(1)[:3]], int(day_m.group(1)))
+        t = (time_str or "").lower()
+        tm = _re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", t)
+        if not tm:
+            return None
+        hr, mn = int(tm.group(1)), int(tm.group(2) or "0")
+        mer = tm.group(3)
+        if mer == "pm" and hr != 12:
+            hr += 12
+        elif mer == "am" and hr == 12:
+            hr = 0
+        return datetime(base.year, base.month, base.day, hr, mn)
+    except Exception:
+        return None
+
+
 def get_latest_appointment_for_patient(from_number: str) -> Optional[AppointmentRecord]:
     appts = get_appointments_by_number(from_number)
     if not appts:
         return None
-    return max(appts, key=lambda a: a.confirmed_at)
+    def _key_fn(a):
+        dt = _parse_appt_datetime(a.date_str, a.time_str)
+        # Use appointment datetime when parseable; fall back to confirmation time
+        return dt if dt is not None else a.confirmed_at.replace(tzinfo=None)
+    try:
+        return max(appts, key=_key_fn)
+    except TypeError:
+        return max(appts, key=lambda a: a.confirmed_at)
 
 
 def cancel_appointment(appointment_id: str) -> bool:
@@ -516,19 +578,26 @@ def delete_pending_lab_review(lab_id: str) -> None:
     _pending_lab_reviews.pop(lab_id.upper(), None)
 
 
+def _lab_review_belongs_to_doctor(data: dict, doctor_number: str) -> bool:
+    """Check single doctor_number field OR multi-doctor doctor_numbers list."""
+    if data.get("doctor_number") == doctor_number:
+        return True
+    return doctor_number in (data.get("doctor_numbers") or [])
+
+
 def get_latest_lab_review_for_doctor(doctor_number: str) -> Optional[dict]:
     if _r is not None:
         try:
             matches = []
             for key in _r.scan_iter(f"{_PREFIX}lab:*"):
                 data = _rget(key)
-                if data and data.get("doctor_number") == doctor_number:
+                if data and _lab_review_belongs_to_doctor(data, doctor_number):
                     matches.append(data)
             if matches:
                 return max(matches, key=lambda r: r.get("created_at", ""))
         except Exception:
             pass
-    matches = [r for r in _pending_lab_reviews.values() if r.get("doctor_number") == doctor_number]
+    matches = [r for r in _pending_lab_reviews.values() if _lab_review_belongs_to_doctor(r, doctor_number)]
     return max(matches, key=lambda r: r.get("created_at", "")) if matches else None
 
 
@@ -558,33 +627,120 @@ def get_last_active(phone: str) -> Optional[datetime]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ATOMIC CONSULTATION-MESSAGE APPEND
+#
+# Redis path  — Lua script executes atomically (Redis is single-threaded).
+#               No read-modify-write race between concurrent patient messages.
+# Fallback    — per-patient threading.Lock guards the in-memory dict.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_APPEND_MSG_LUA = """
+local key    = KEYS[1]
+local msg_j  = ARGV[1]
+local ts     = ARGV[2]
+local ttl    = tonumber(ARGV[3])
+local raw    = redis.call('GET', key)
+if not raw then return 0 end
+local ok, data = pcall(cjson.decode, raw)
+if not ok then return -1 end
+if type(data['messages']) ~= 'table' then data['messages'] = {} end
+local ok2, m = pcall(cjson.decode, msg_j)
+if not ok2 then return -2 end
+table.insert(data['messages'], m)
+data['last_activity'] = ts
+local ok3, serialized = pcall(cjson.encode, data)
+if not ok3 then return -3 end
+if ttl > 0 then
+    redis.call('SETEX', key, ttl, serialized)
+else
+    redis.call('SET', key, serialized)
+end
+return #data['messages']
+"""
+
+_lua_append_msg = _r.register_script(_APPEND_MSG_LUA) if _r is not None else None
+
+_consult_append_locks: dict[str, threading.Lock] = {}
+_consult_append_locks_guard = threading.Lock()
+
+
+def _get_consult_lock(patient_number: str) -> threading.Lock:
+    with _consult_append_locks_guard:
+        if patient_number not in _consult_append_locks:
+            _consult_append_locks[patient_number] = threading.Lock()
+        return _consult_append_locks[patient_number]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CONSULTATION SESSIONS  (Sprint 2)
 # Key: clinicai:consult:{patient_number}   TTL 4h
 # ══════════════════════════════════════════════════════════════════════════════
 
 def save_consultation(patient_number: str, session: ConsultationSession) -> None:
     session.last_activity = datetime.now()
-    _rset(_key(f"consult:{patient_number}"), session.model_dump(), _TTL_CONSULTATION)
+    data = session.model_dump()
+    if session.clinic_id:
+        _rset(_key(f"consult:{session.clinic_id}:{patient_number}"), data, _TTL_CONSULTATION)
+    # Legacy key kept so scheduler timeout jobs (which don't carry clinic_id) can find sessions
+    _rset(_key(f"consult:{patient_number}"), data, _TTL_CONSULTATION)
     _consultations[patient_number] = session
 
 
-def get_consultation(patient_number: str) -> Optional[ConsultationSession]:
+def get_consultation(patient_number: str, clinic_id: str | None = None) -> Optional[ConsultationSession]:
+    if clinic_id:
+        data = _rget(_key(f"consult:{clinic_id}:{patient_number}"))
+        if data:
+            return ConsultationSession.model_validate(data)
     data = _rget(_key(f"consult:{patient_number}"))
     if data:
         return ConsultationSession.model_validate(data)
     return _consultations.get(patient_number)
 
 
-def delete_consultation(patient_number: str) -> None:
+def delete_consultation(patient_number: str, clinic_id: str | None = None) -> None:
+    if clinic_id:
+        _rdel(_key(f"consult:{clinic_id}:{patient_number}"))
     _rdel(_key(f"consult:{patient_number}"))
     _consultations.pop(patient_number, None)
 
 
 def append_consultation_message(patient_number: str, msg: ConsultationMessage) -> None:
-    session = get_consultation(patient_number)
-    if session:
-        session.messages.append(msg)
-        save_consultation(patient_number, session)
+    """Atomically append a message to the active ConsultationSession.
+
+    Redis path:  Lua script — single atomic operation, no race condition.
+    Memory path: per-patient threading.Lock — prevents lost-update race.
+    """
+    msg_json = json.dumps(msg.model_dump(), default=str)
+    now_str = datetime.now().isoformat()
+
+    # Derive the correct key: prefer clinic-scoped if the in-memory session has clinic_id
+    cs = _consultations.get(patient_number)
+    _cid = cs.clinic_id if cs else None
+    redis_key = _key(f"consult:{_cid}:{patient_number}") if _cid else _key(f"consult:{patient_number}")
+
+    if _lua_append_msg is not None:
+        try:
+            result = _lua_append_msg(
+                keys=[redis_key],
+                args=[msg_json, now_str, str(_TTL_CONSULTATION)],
+            )
+            if isinstance(result, int) and result > 0:
+                return  # Redis updated atomically; in-memory is an acceptable stale cache
+        except Exception as exc:
+            logger.warning("[store] Lua append failed for %s, falling back: %s", patient_number, exc)
+        # Lua unavailable or failed — best-effort read-modify-write via Redis
+        session = get_consultation(patient_number, clinic_id=_cid)
+        if session:
+            session.messages.append(msg)
+            save_consultation(patient_number, session)
+        return
+
+    # Pure in-memory fallback: lock prevents concurrent lost-update
+    with _get_consult_lock(patient_number):
+        session = _consultations.get(patient_number)
+        if session:
+            session.messages.append(msg)
+            session.last_activity = datetime.now()
 
 
 def all_consultations() -> dict:
@@ -607,11 +763,21 @@ def all_consultations() -> dict:
 # Key: clinicai:afterhours:{doctor_number}   TTL 36h  (JSON list)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def queue_after_hours_message(doctor_number: str, from_number: str, body: str) -> None:
+def queue_after_hours_message(
+    doctor_number: str,
+    from_number: str,
+    body: str,
+    metadata: dict | None = None,
+) -> None:
+    """Queue a message for delivery when the clinic re-opens.
+    Pass *metadata* with clinic_id / clinic_open_hour / clinic_close_hour so the
+    flush job can re-inject each message with its original clinic context.
+    """
     entry = {
         "from_number": from_number,
         "body": body,
         "queued_at": datetime.now().isoformat(),
+        **(metadata or {}),
     }
     existing = get_after_hours_queue(doctor_number)
     existing.append(entry)
@@ -632,35 +798,93 @@ def clear_after_hours_queue(doctor_number: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DOCTOR REPLY CONTEXT
-# Remembers which patient last messaged a doctor so freetext replies are
-# automatically forwarded without the doctor needing to type a command.
+# DOCTOR REPLY CONTEXT  — queue of patients who have messaged the doctor
+#
+# Stored as a JSON list (most-recent-first, max 10 entries) so multiple
+# concurrent patient messages do not silently drop earlier conversations.
+# The doctor's next free-text reply goes to the most-recent patient; after
+# the reply that entry is popped so the next patient becomes the default.
+#
 # Key: clinicai:doctor_reply_ctx:{doctor_number}   TTL 7200s (2h)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _TTL_REPLY_CTX = 7_200  # 2 hours
+_MAX_REPLY_CTX = 10     # maximum pending patients per doctor
+
+
+def _get_ctx_list(doctor_number: str) -> list[dict]:
+    """Load the reply-context as a list, handling both old (dict) and new (list) formats."""
+    data = _rget(_key(f"doctor_reply_ctx:{doctor_number}"))
+    if data is None:
+        mem = _doctor_reply_contexts.get(doctor_number)
+        if mem is None:
+            return []
+        # mem is always a list now, but guard against stale dict in-memory
+        return list(mem) if isinstance(mem, list) else ([mem] if isinstance(mem, dict) else [])
+    if isinstance(data, dict):
+        return [data]   # backward-compat: single-patient old Redis format
+    if isinstance(data, list):
+        return data
+    return []
 
 
 def save_doctor_reply_context(doctor_number: str, patient_number: str, patient_name: str) -> None:
-    data = {
+    """Push a patient to the front of the doctor's reply-context queue (dedup by patient)."""
+    entry = {
         "patient_number": patient_number,
         "patient_name": patient_name,
         "saved_at": datetime.now().isoformat(),
     }
-    _rset(_key(f"doctor_reply_ctx:{doctor_number}"), data, _TTL_REPLY_CTX)
-    _doctor_reply_contexts[doctor_number] = data
+    queue = [e for e in _get_ctx_list(doctor_number) if e.get("patient_number") != patient_number]
+    queue.insert(0, entry)
+    queue = queue[:_MAX_REPLY_CTX]
+    _rset(_key(f"doctor_reply_ctx:{doctor_number}"), queue, _TTL_REPLY_CTX)
+    _doctor_reply_contexts[doctor_number] = queue   # store full list, not just first item
 
 
 def get_doctor_reply_context(doctor_number: str) -> Optional[dict]:
-    data = _rget(_key(f"doctor_reply_ctx:{doctor_number}"))
-    if data:
-        return data
-    return _doctor_reply_contexts.get(doctor_number)
+    """Return the most-recent patient context, or None if the queue is empty."""
+    queue = _get_ctx_list(doctor_number)
+    return queue[0] if queue else None
+
+
+def pop_doctor_reply_context(doctor_number: str, patient_number: str) -> None:
+    """Remove a specific patient from the reply-context queue after the doctor has replied."""
+    queue = [e for e in _get_ctx_list(doctor_number) if e.get("patient_number") != patient_number]
+    if queue:
+        _rset(_key(f"doctor_reply_ctx:{doctor_number}"), queue, _TTL_REPLY_CTX)
+        _doctor_reply_contexts[doctor_number] = queue   # keep the remaining list
+    else:
+        _rdel(_key(f"doctor_reply_ctx:{doctor_number}"))
+        _doctor_reply_contexts.pop(doctor_number, None)
 
 
 def clear_doctor_reply_context(doctor_number: str) -> None:
     _rdel(_key(f"doctor_reply_ctx:{doctor_number}"))
     _doctor_reply_contexts.pop(doctor_number, None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CROSS-WORKER PDF PATH REGISTRY  (MED-7)
+# In-process dicts are per-worker; a PDF stored by Worker A is invisible to
+# Worker B.  Registering in Redis lets any worker serve a PDF by document_id.
+# Key: clinicai:pdf:{namespace}:{document_id}   TTL 7 days
+# ══════════════════════════════════════════════════════════════════════════════
+
+_TTL_PDF_REG = 86_400 * 7  # 7 days
+
+
+def register_pdf(namespace: str, document_id: str, file_path: str) -> None:
+    """Store document_id → file_path in Redis so any worker can find the file."""
+    _rset(_key(f"pdf:{namespace}:{document_id}"), {"path": file_path}, _TTL_PDF_REG)
+
+
+def lookup_pdf(namespace: str, document_id: str) -> Optional[str]:
+    """Return the stored file path for a document_id, or None if not in Redis."""
+    data = _rget(_key(f"pdf:{namespace}:{document_id}"))
+    if data and isinstance(data, dict):
+        return data.get("path")
+    return None
 
 
 # ── Internal helper ────────────────────────────────────────────────────────────

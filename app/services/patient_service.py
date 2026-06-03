@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -53,12 +54,24 @@ async def upsert_patient(
                 name=name,
             )
             db.add(patient)
-            await db.flush()
-            logger.info("[patient_service] Created patient %s for clinic %s", phone_number, clinic_id)
-        else:
-            if name and not patient.name:
-                patient.name = name
-            patient.last_visit_at = datetime.utcnow()
+            try:
+                await db.flush()
+                logger.info("[patient_service] Created patient %s for clinic %s", phone_number, clinic_id)
+            except IntegrityError:
+                # Concurrent insert won the race — roll back the failed insert and
+                # fetch the row that was committed by the other request.
+                await db.rollback()
+                result = await db.execute(
+                    select(Patient).where(
+                        Patient.clinic_id == clinic_id,
+                        Patient.phone_number == phone_number,
+                    )
+                )
+                patient = result.scalar_one()
+                logger.info("[patient_service] Concurrent upsert resolved for %s", phone_number)
+        if name and not patient.name:
+            patient.name = name
+        patient.last_visit_at = datetime.utcnow()
 
         if close_session:
             await db.commit()

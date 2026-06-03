@@ -9,6 +9,23 @@ load_dotenv()
 
 UserRole = Literal["doctor", "patient"]
 
+# In-process cache populated from DB at startup and refreshed on doctor CRUD.
+# Keyed by normalized phone → doctor name (or None).
+_db_doctors_cache: dict[str, str | None] = {}
+
+
+def refresh_db_doctors_cache(doctors: list) -> None:
+    """
+    Rebuild the identity cache from a list of Doctor ORM objects.
+    Call this at startup and whenever a doctor is created / updated / deleted.
+    """
+    global _db_doctors_cache
+    _db_doctors_cache = {
+        normalize_whatsapp_number(d.whatsapp_number): d.name
+        for d in doctors
+        if getattr(d, "is_active", True)
+    }
+
 
 @dataclass(frozen=True)
 class SenderIdentity:
@@ -72,42 +89,47 @@ def _normalize_name(name: str | None) -> str:
 
 def identify_sender(raw_from: str) -> SenderIdentity:
     """
-    Known doctor numbers route to doctor flow.
-    Unknown numbers are treated as patients because patients can message first.
+    Check env var first (dev override), then DB cache (dashboard-registered doctors).
+    Unknown numbers are treated as patients.
     """
     phone_number = normalize_whatsapp_number(raw_from)
-    doctors = _doctor_numbers_from_env()
 
-    if phone_number in doctors:
-        return SenderIdentity(
-            phone_number=phone_number,
-            role="doctor",
-            display_name=doctors[phone_number],
-        )
+    env_doctors = _doctor_numbers_from_env()
+    if phone_number in env_doctors:
+        return SenderIdentity(phone_number=phone_number, role="doctor", display_name=env_doctors[phone_number])
+
+    if phone_number in _db_doctors_cache:
+        return SenderIdentity(phone_number=phone_number, role="doctor", display_name=_db_doctors_cache[phone_number])
 
     return SenderIdentity(phone_number=phone_number, role="patient")
 
 
 def all_doctor_numbers() -> list[str]:
-    return sorted(_doctor_numbers_from_env().keys())
+    """Return all doctor numbers from env var + DB cache."""
+    return sorted(set(_doctor_numbers_from_env().keys()) | set(_db_doctors_cache.keys()))
 
 
 def find_doctor_number(doctor_name: str | None = None) -> str | None:
-    doctors = _doctor_numbers_from_env()
-    if not doctors:
+    """Look up a doctor's WhatsApp number by name. Returns None if not found — never falls back to index 0."""
+    all_doctors: dict[str, str | None] = {**_db_doctors_cache, **_doctor_numbers_from_env()}
+    if not all_doctors:
         return None
 
     requested = _normalize_name(doctor_name)
     if requested:
-        for number, configured_name in doctors.items():
+        for number, configured_name in all_doctors.items():
             if _normalize_name(configured_name) == requested:
                 return number
 
-    return next(iter(doctors.keys()))
+    return None  # No silent fallback to first doctor
 
 
 def find_doctor_name(doctor_number: str) -> str | None:
-    return _doctor_numbers_from_env().get(normalize_whatsapp_number(doctor_number))
+    normalized = normalize_whatsapp_number(doctor_number)
+    env_doctors = _doctor_numbers_from_env()
+    if normalized in env_doctors:
+        return env_doctors[normalized]
+    return _db_doctors_cache.get(normalized)
 
 
 async def is_doctor_from_db(phone_number: str) -> tuple[bool, str | None]:
@@ -141,14 +163,18 @@ async def is_doctor_from_db(phone_number: str) -> tuple[bool, str | None]:
 
 async def identify_sender_async(raw_from: str) -> SenderIdentity:
     """
-    Async version of identify_sender — checks env var first, then DB.
-    Use this in the webhook when possible.
+    Async version of identify_sender — checks env var, then in-memory cache, then DB.
+    The cache check avoids a DB query on every patient message (the common case).
+    The DB fallback handles new doctors added after startup without a restart.
     """
     phone_number = normalize_whatsapp_number(raw_from)
     doctors = _doctor_numbers_from_env()
     if phone_number in doctors:
         return SenderIdentity(phone_number=phone_number, role="doctor", display_name=doctors[phone_number])
-    # Fallback: check database
+    # Check startup-populated cache before hitting the database
+    if phone_number in _db_doctors_cache:
+        return SenderIdentity(phone_number=phone_number, role="doctor", display_name=_db_doctors_cache[phone_number])
+    # Cache miss: query DB (rare — covers doctors added after last startup/refresh)
     is_doc, name = await is_doctor_from_db(phone_number)
     if is_doc:
         return SenderIdentity(phone_number=phone_number, role="doctor", display_name=name)

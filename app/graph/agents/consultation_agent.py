@@ -59,6 +59,7 @@ def start_or_resume_node(state: BookingState) -> dict:
     Set journey_state = CONSULTATION_ACTIVE on BookingSession.
     """
     from app.services.store import (
+        append_consultation_message,
         get_consultation, save_consultation,
         get_session, save_session,
         get_latest_appointment_for_patient,
@@ -69,19 +70,19 @@ def start_or_resume_node(state: BookingState) -> dict:
     from_number = state["from_number"]
     message = state["incoming_message"]
     session_dict = state.get("session") or {}
+    clinic_id = session_dict.get("clinic_id")
     tz = ZoneInfo(_TZ_NAME)
     now = datetime.now(tz)
 
-    existing = get_consultation(from_number)
+    existing = get_consultation(from_number, clinic_id=clinic_id)
 
     if existing and existing.is_active:
-        existing.messages.append(ConsultationMessage(
+        append_consultation_message(from_number, ConsultationMessage(
             sender_role="patient",
             text=message,
             timestamp=now,
         ))
-        save_consultation(from_number, existing)
-        reset_consultation_timeout(from_number, existing.consultation_id)
+        reset_consultation_timeout(from_number, existing.consultation_id, clinic_id=existing.clinic_id)
         return {
             "pipeline_log": [f"consultation_agent: buffered patient message, consultation {existing.consultation_id}"],
         }
@@ -97,8 +98,16 @@ def start_or_resume_node(state: BookingState) -> dict:
         doctor_number = find_doctor_number(doctor_name) or ""
 
     if not doctor_number:
-        doctor_numbers = all_doctor_numbers()
-        doctor_number = doctor_numbers[0] if doctor_numbers else ""
+        # No appointment found — ask the patient to book one first.
+        # We never silently assign an arbitrary doctor.
+        return {
+            "reply_message": (
+                "To begin a consultation, I need your appointment details. "
+                "Please say *'Book appointment'* and I'll connect you with the right doctor. 🏥\n\n"
+                "_For emergencies, call *112* immediately._"
+            ),
+            "pipeline_log": [f"consultation_agent: no appointment/doctor found for {from_number} — asked to book first"],
+        }
 
     if not doctor_name and doctor_number:
         doctor_name = find_doctor_name(doctor_number) or doctor_number
@@ -109,16 +118,17 @@ def start_or_resume_node(state: BookingState) -> dict:
         patient_number=from_number,
         doctor_number=doctor_number,
         doctor_name=doctor_name,
+        clinic_id=clinic_id,
         appointment_id=appt.appointment_id if appt else None,
         messages=[ConsultationMessage(sender_role="patient", text=message, timestamp=now)],
         started_at=now,
         last_activity=now,
     )
     save_consultation(from_number, new_session)
-    schedule_consultation_timeout(from_number, consultation_id)
+    schedule_consultation_timeout(from_number, consultation_id, clinic_id=clinic_id)
 
     # Update BookingSession journey_state
-    booking = get_session(from_number)
+    booking = get_session(from_number, clinic_id=clinic_id)
     if not booking and session_dict:
         try:
             booking = BookingSession(**session_dict)
@@ -135,10 +145,12 @@ def start_or_resume_node(state: BookingState) -> dict:
     }
 
 
-def reset_consultation_timeout(patient_number: str, consultation_id: str) -> None:
+def reset_consultation_timeout(
+    patient_number: str, consultation_id: str, clinic_id: str | None = None
+) -> None:
     from app.services.scheduler import reset_consultation_timeout as _reset
     try:
-        _reset(patient_number, consultation_id)
+        _reset(patient_number, consultation_id, clinic_id=clinic_id)
     except Exception:
         pass
 
@@ -184,20 +196,19 @@ def detect_end_node(state: BookingState) -> dict:
 
 
 def finalize_node(state: BookingState) -> dict:
-    """Call consultation_service to build bundle, call Jameel API, send summary to doctor."""
-    import asyncio
+    """Call consultation_service to build bundle, call Jameel API, send summary to doctor.
+
+    Runs via async_runner.run_async() which uses the main event loop when available
+    (shares the DB connection pool) and falls back to asyncio.run() otherwise.
+    This node always executes inside asyncio.to_thread() so there is no running
+    event loop in the current thread — asyncio.run() is always safe here.
+    """
+    from app.services.async_runner import run_async
     from app.services.consultation_service import finalize_and_send
 
     from_number = state["from_number"]
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, finalize_and_send(from_number))
-                patient_reply = future.result(timeout=70)
-        else:
-            patient_reply = loop.run_until_complete(finalize_and_send(from_number))
+        patient_reply = run_async(finalize_and_send(from_number), timeout=90)
     except Exception as exc:
         print(f"[ConsultationAgent] finalize_and_send failed: {exc}")
         patient_reply = "Your consultation has been recorded. The doctor will follow up shortly. 🙏"
@@ -223,6 +234,13 @@ def ack_node(state: BookingState) -> dict:
 # ROUTING
 # ══════════════════════════════════════════════════════════════════════════════
 
+def route_after_start(state: BookingState) -> Literal["detect_end_node", "__end__"]:
+    """If start_or_resume set a reply_message (no doctor/appointment), end immediately."""
+    if state.get("reply_message"):
+        return END
+    return "detect_end_node"
+
+
 def route_after_detect(state: BookingState) -> Literal["finalize_node", "ack_node"]:
     """Route to finalize if consultation has ended, ack otherwise."""
     from app.services.store import get_consultation
@@ -246,7 +264,11 @@ def build_consultation_graph():
     g.add_node("ack_node", ack_node)
 
     g.add_edge(START, "start_or_resume_node")
-    g.add_edge("start_or_resume_node", "detect_end_node")
+    g.add_conditional_edges(
+        "start_or_resume_node",
+        route_after_start,
+        {"detect_end_node": "detect_end_node", END: END},
+    )
     g.add_conditional_edges(
         "detect_end_node",
         route_after_detect,

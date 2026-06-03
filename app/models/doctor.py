@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -11,6 +11,9 @@ from app.database import Base
 
 class Doctor(Base):
     __tablename__ = "doctors"
+    __table_args__ = (
+        UniqueConstraint("clinic_id", "whatsapp_number", name="uq_doctor_clinic_whatsapp"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
     clinic_id: Mapped[str] = mapped_column(

@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from datetime import datetime, timedelta, date as date_type
@@ -9,6 +10,8 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
+
+_log = logging.getLogger(__name__)
 
 REMINDER_MINUTES = int(os.getenv("REMINDER_MINUTES_BEFORE", "120"))  # 2 hours default
 _DEMO_REMINDER_DELAY = os.getenv("DEMO_REMINDER_DELAY_MINUTES", "").strip()  # e.g. "2" for demo
@@ -26,7 +29,56 @@ _MONTHS = {
     "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
 
-scheduler = BackgroundScheduler(timezone=_TZ_NAME)
+# Set DISABLE_SCHEDULER=true on all workers except one in a multi-worker deployment.
+# This prevents duplicate reminders, insights, and after-hours flushes.
+SCHEDULER_DISABLED = os.getenv("DISABLE_SCHEDULER", "").lower() == "true"
+
+# coalesce=True  — if a job misfired multiple times, run it once on recovery.
+# max_instances=1 — never run the same job twice simultaneously.
+_JOB_DEFAULTS = {"coalesce": True, "max_instances": 1, "misfire_grace_time": 300}
+
+
+def _build_scheduler() -> BackgroundScheduler:
+    """Build APScheduler with a persistent job store when available (MED-4).
+
+    Job store priority:
+    1. SCHEDULER_DB_URL env var (explicit override)
+    2. DATABASE_URL converted from asyncpg → psycopg2
+    3. SQLite file  scheduler_jobs.db  in the working directory
+    4. In-memory fallback (jobs lost on restart — prints a warning)
+    """
+    try:
+        from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+
+        db_url = os.getenv("SCHEDULER_DB_URL", "").strip()
+        if not db_url:
+            raw = os.getenv("DATABASE_URL", "")
+            if raw:
+                db_url = (
+                    raw
+                    .replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+                    .replace("asyncpg://", "postgresql+psycopg2://")
+                )
+            else:
+                db_url = "sqlite:///scheduler_jobs.db"
+
+        jobstores = {"default": SQLAlchemyJobStore(url=db_url)}
+        _log.info("[scheduler] Persistent job store: %s", db_url.split("@")[-1] if "@" in db_url else db_url)
+        return BackgroundScheduler(
+            jobstores=jobstores,
+            job_defaults=_JOB_DEFAULTS,
+            timezone=_TZ_NAME,
+        )
+    except Exception as exc:
+        _log.warning(
+            "[scheduler] Persistent job store unavailable (%s) — "
+            "scheduled jobs will be lost on restart. "
+            "Set SCHEDULER_DB_URL or install psycopg2/sqlalchemy to fix.", exc,
+        )
+        return BackgroundScheduler(job_defaults=_JOB_DEFAULTS, timezone=_TZ_NAME)
+
+
+scheduler = _build_scheduler()
 
 
 def _resolve_appointment_datetime(date_str: str, time_str: str) -> datetime | None:
@@ -253,12 +305,18 @@ def cancel_no_show_jobs(appointment_id: str) -> None:
 
 # ── Consultation timeout jobs ──────────────────────────────────────────────────
 
-def _consultation_timeout_job(patient_number: str, consultation_id: str) -> None:
-    """Fires after CONSULTATION_TIMEOUT_MINUTES of inactivity. Finalises the consultation."""
-    import asyncio
-    from app.services.store import get_consultation, save_consultation
+def _consultation_timeout_job(
+    patient_number: str, consultation_id: str, clinic_id: str | None = None
+) -> None:
+    """Fires after CONSULTATION_TIMEOUT_MINUTES of inactivity. Finalises the consultation.
 
-    session = get_consultation(patient_number)
+    Uses async_runner.run_async so finalize_and_send runs on the main event loop
+    (shares the DB connection pool) instead of creating throwaway connections.
+    """
+    from app.services.store import get_consultation, save_consultation
+    from app.services.async_runner import run_async
+
+    session = get_consultation(patient_number, clinic_id=clinic_id)
     if not session or not session.is_active or session.consultation_id != consultation_id:
         return
 
@@ -269,19 +327,23 @@ def _consultation_timeout_job(patient_number: str, consultation_id: str) -> None
     print(f"[Consultation] Timeout fired for {patient_number} — finalising")
     try:
         from app.services.consultation_service import finalize_and_send
-        asyncio.run(finalize_and_send(patient_number))
+        run_async(finalize_and_send(patient_number), timeout=90)
     except Exception as exc:
         print(f"[Consultation] Timeout finalisation failed for {patient_number}: {exc}")
 
 
-def schedule_consultation_timeout(patient_number: str, consultation_id: str) -> None:
-    """Schedule or reset the 30-min inactivity timer (replace_existing=True resets the clock)."""
+def schedule_consultation_timeout(
+    patient_number: str, consultation_id: str, clinic_id: str | None = None
+) -> None:
+    """Schedule or reset the 30-min inactivity timer (replace_existing=True resets the clock).
+    clinic_id is stored as a job argument so the timeout job can find the clinic-scoped session.
+    """
     tz = ZoneInfo(_TZ_NAME)
     fire_at = datetime.now(tz) + timedelta(minutes=CONSULTATION_TIMEOUT_MINUTES)
     scheduler.add_job(
         func=_consultation_timeout_job,
         trigger=DateTrigger(run_date=fire_at),
-        args=[patient_number, consultation_id],
+        args=[patient_number, consultation_id, clinic_id],
         id=f"consult_timeout_{patient_number}",
         replace_existing=True,
         misfire_grace_time=300,
@@ -289,9 +351,11 @@ def schedule_consultation_timeout(patient_number: str, consultation_id: str) -> 
     print(f"[Consultation] Timeout set for {patient_number} at {fire_at.strftime('%H:%M')} ({CONSULTATION_TIMEOUT_MINUTES} min)")
 
 
-def reset_consultation_timeout(patient_number: str, consultation_id: str) -> None:
+def reset_consultation_timeout(
+    patient_number: str, consultation_id: str, clinic_id: str | None = None
+) -> None:
     """Reset the inactivity timer on any new message."""
-    schedule_consultation_timeout(patient_number, consultation_id)
+    schedule_consultation_timeout(patient_number, consultation_id, clinic_id=clinic_id)
 
 
 def cancel_consultation_timeout(patient_number: str) -> None:
@@ -305,7 +369,11 @@ def cancel_consultation_timeout(patient_number: str) -> None:
 # ── After-hours flush jobs ─────────────────────────────────────────────────────
 
 def _flush_afterhours_job(doctor_number: str) -> None:
-    """Runs at clinic open time — re-injects queued after-hours messages into router_graph."""
+    """Runs at clinic open time — re-injects queued after-hours messages into router_graph.
+
+    Each queued entry now carries its original clinic context (clinic_id,
+    clinic_open_hour, clinic_close_hour) so per-clinic hours are respected.
+    """
     from app.services.store import get_after_hours_queue, clear_after_hours_queue
 
     queued = get_after_hours_queue(doctor_number)
@@ -315,6 +383,7 @@ def _flush_afterhours_job(doctor_number: str) -> None:
     print(f"[AfterHours] Flushing {len(queued)} queued messages for doctor {doctor_number}")
     clear_after_hours_queue(doctor_number)
 
+    _default_close = int(os.getenv("CLINIC_CLOSE_HOUR", "20"))
     try:
         from app.graph.router import router_graph
         for item in queued:
@@ -323,7 +392,13 @@ def _flush_afterhours_job(doctor_number: str) -> None:
             if not from_number or not body:
                 continue
             config = {"configurable": {"thread_id": from_number}}
-            state_update = {"from_number": from_number, "incoming_message": body}
+            state_update = {
+                "from_number": from_number,
+                "incoming_message": body,
+                "clinic_id": item.get("clinic_id"),
+                "clinic_open_hour": item.get("clinic_open_hour") or _CLINIC_OPEN_HOUR,
+                "clinic_close_hour": item.get("clinic_close_hour") or _default_close,
+            }
             try:
                 router_graph.invoke(state_update, config=config)
             except Exception as msg_exc:

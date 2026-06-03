@@ -60,6 +60,17 @@ export interface ModelConfig {
   api_key: string;
 }
 
+export interface ModelConfigUpdatePayload {
+  llm_vendor?: string;
+  llm_model?: string;
+  stt_vendor?: string;
+  stt_model?: string;
+  groq_api_key?: string;
+  anthropic_api_key?: string;
+  openai_api_key?: string;
+  google_api_key?: string;
+}
+
 export interface Me {
   id: string;
   email: string;
@@ -121,7 +132,7 @@ export async function fetchModelConfig(clinicId: string): Promise<ModelConfig> {
 
 export async function updateModelConfig(
   clinicId: string,
-  payload: ModelConfig
+  payload: ModelConfigUpdatePayload
 ): Promise<ModelConfig> {
   const { data } = await client.put<ModelConfig>(
     `/api/clinics/${clinicId}/config`,

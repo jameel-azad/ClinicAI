@@ -26,7 +26,9 @@ from langgraph.graph import StateGraph, START, END
 
 from app.schemas import BookingSession, BookingState
 from app.graph.classifier import classifier_graph
-from app.graph.agents.after_hours_agent import after_hours_agent_graph, is_clinic_open
+from app.graph.agents.after_hours_agent import (
+    after_hours_agent_graph, is_clinic_open, CLINIC_OPEN_HOUR, CLINIC_CLOSE_HOUR,
+)
 from app.graph.agents.booking_agent import booking_agent_graph
 from app.graph.agents.emergency_agent import emergency_agent_graph
 from app.graph.agents.followup_agent import followup_agent_graph
@@ -46,13 +48,19 @@ EMPTY_ENTITIES = {
 
 def after_hours_check_node(state: BookingState) -> dict:
     """Pre-check: if clinic is closed, queue message and return ack. Sets reply_message."""
-    if is_clinic_open():
+    open_hour  = state.get("clinic_open_hour")  or CLINIC_OPEN_HOUR
+    close_hour = state.get("clinic_close_hour") or CLINIC_CLOSE_HOUR
+
+    if is_clinic_open(open_hour, close_hour):
         # Reset any stale reply_message from the MemorySaver checkpoint
         return {"reply_message": "", "pipeline_log": ["router: clinic open — continuing"]}
 
     result = after_hours_agent_graph.invoke({
         "from_number": state["from_number"],
         "incoming_message": state["incoming_message"],
+        "clinic_id": state.get("clinic_id"),
+        "clinic_open_hour": open_hour,
+        "clinic_close_hour": close_hour,
         "intent": "general_query",
         "confidence": 0.0,
         "extracted_entities": EMPTY_ENTITIES.copy(),
@@ -76,13 +84,14 @@ def intent_node(state: BookingState) -> dict:
 
     from_number = state["from_number"]
     message = state["incoming_message"]
+    clinic_id = state.get("clinic_id")
 
     update_last_active(from_number)
 
     context_message = None
     session_dict = state.get("session")
     if not session_dict:
-        redis_session = get_session(from_number)
+        redis_session = get_session(from_number, clinic_id=clinic_id)
         if redis_session:
             session_dict = redis_session.model_dump()
     if session_dict:
@@ -113,16 +122,18 @@ def intent_node(state: BookingState) -> dict:
 def session_node(state: BookingState) -> dict:
     from app.services.store import get_session, save_session
 
+    clinic_id = state.get("clinic_id")
+
     # Prefer MemorySaver checkpoint for booking flow state (keeps in-progress
     # bookings intact across messages). But always pull journey_state from Redis
     # because background jobs (scheduler) write there and bypass the checkpoint.
     existing = state.get("session")
     if not existing:
-        redis_session = get_session(state["from_number"])
+        redis_session = get_session(state["from_number"], clinic_id=clinic_id)
         if redis_session:
             existing = redis_session.model_dump()
     else:
-        redis_session = get_session(state["from_number"])
+        redis_session = get_session(state["from_number"], clinic_id=clinic_id)
         if redis_session and redis_session.journey_state != existing.get("journey_state"):
             existing = dict(existing)
             existing["journey_state"] = redis_session.journey_state
@@ -139,7 +150,7 @@ def session_node(state: BookingState) -> dict:
             "pipeline_log": [f"router/session_node: loaded state={existing.get('state')}"],
         }
     else:
-        new_session = BookingSession(from_number=state["from_number"])
+        new_session = BookingSession(from_number=state["from_number"], clinic_id=clinic_id)
         save_session(new_session)
         return {
             "session": new_session.model_dump(),
@@ -154,6 +165,7 @@ def _invoke_sub_agent(graph, state: BookingState) -> dict:
     sub_input = {
         "from_number": state["from_number"],
         "incoming_message": state["incoming_message"],
+        "messages": state.get("messages") or [],   # pass conversation history for multi-turn context
         "intent": state.get("intent", "general_query"),
         "confidence": state.get("confidence", 0.0),
         "extracted_entities": state.get("extracted_entities", {}),

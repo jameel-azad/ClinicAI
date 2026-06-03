@@ -117,10 +117,10 @@ def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, te
     """
     If the doctor has an active reply context (a patient just messaged them),
     silently forward their freetext to that patient — no command needed.
-    Known commands are always caught before this function is reached, so
-    there is no risk of accidentally forwarding a command to a patient.
+    After a successful send, the patient is popped from the queue so the next
+    most-recent patient becomes the new default recipient.
     """
-    from app.services.store import get_doctor_reply_context
+    from app.services.store import get_doctor_reply_context, pop_doctor_reply_context
     from app.services.whatsapp import send_whatsapp_message_sync
 
     ctx = get_doctor_reply_context(doctor_number)
@@ -136,6 +136,7 @@ def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, te
     outbound = f"📩 *Dr. {doctor_name}:* {message.strip()}"
     sent = send_whatsapp_message_sync(patient_number, outbound)
     if sent:
+        pop_doctor_reply_context(doctor_number, patient_number)
         return f"✅ Sent to {patient_name}."
     return f"Could not reach {patient_name} ({patient_number}). Please try again."
 

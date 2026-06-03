@@ -18,7 +18,14 @@ class SenderIdentity:
 
 
 def normalize_whatsapp_number(raw_number: str) -> str:
-    """Normalize Twilio WhatsApp numbers to a comparable E.164-like string."""
+    """Normalize WhatsApp numbers to a comparable E.164-like string.
+
+    Handles both legacy Twilio format ("whatsapp:+919801581020") and
+    Meta Cloud API format (plain E.164: "+919801581020"). Either way the
+    result is a consistent "+<digits>" string so doctor-number lookups work
+    regardless of which provider sent the webhook.
+    """
+    # Strip Twilio "whatsapp:" prefix — Meta sends plain E.164 with no prefix.
     number = raw_number.replace("whatsapp:", "").strip()
     if not number:
         return number
@@ -27,6 +34,8 @@ def normalize_whatsapp_number(raw_number: str) -> str:
     digits = re.sub(r"\D", "", number)
     if not digits:
         return number
+    # Meta numbers already arrive as "+91XXXXXXXXXX"; this preserves the "+"
+    # so that all_doctor_numbers() and identify_sender() match correctly.
     return f"+{digits}" if has_plus else digits
 
 

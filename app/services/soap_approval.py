@@ -4,7 +4,7 @@ import shutil
 
 from app.services.clinical_scribe import get_scribe_pdf_path, _format_fhir_whatsapp_summary
 from app.services.store import delete_pending_soap, get_latest_soap_for_doctor, get_pending_soap, save_pending_soap
-from app.services.whatsapp import send_whatsapp_media_sync, send_whatsapp_message_sync
+from app.services.whatsapp import send_whatsapp_document_sync, send_whatsapp_message_sync
 
 
 def handle_soap_button_reply(button_payload: str, doctor_number: str) -> str | None:
@@ -68,7 +68,7 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
     patient_number = f"+{digits}" if patient_number.strip().startswith("+") else digits
 
     public_url = _scribe_pdf_url(document_id)
-    body = f"Doctor's consultation note for {patient_name} is attached."
+    caption = f"Doctor's consultation note for {patient_name} is attached."
 
     delete_pending_soap(soap_id)
 
@@ -76,7 +76,8 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
     follow_up_days = soap.get("follow_up_days")
 
     if public_url:
-        sent = send_whatsapp_media_sync(patient_number, body, public_url)
+        filename = f"consultation_{soap_id}.pdf"
+        sent = send_whatsapp_document_sync(patient_number, public_url, filename, caption)
         if sent:
             _mark_post_consult(patient_number)
             _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days)
@@ -85,7 +86,7 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
 
     pdf_path = get_scribe_pdf_path(document_id) if document_id else None
     return (
-        f"✅ Approved, but PUBLIC_BASE_URL is not configured — cannot attach via Twilio.\n"
+        f"✅ Approved, but PUBLIC_BASE_URL is not configured — cannot attach the PDF.\n"
         f"Please forward manually to {patient_number}.\n"
         f"PDF: {pdf_path or 'unavailable'}"
     )
@@ -190,7 +191,8 @@ def _regen(soap_id: str, feedback: str) -> str | None:
         )
 
         if public_url:
-            send_whatsapp_media_sync(doctor_number, regen_msg, public_url)
+            filename = f"consultation_{soap_id}.pdf"
+            send_whatsapp_document_sync(doctor_number, public_url, filename, regen_msg)
         else:
             send_whatsapp_message_sync(doctor_number, regen_msg)
 

@@ -1,1309 +1,914 @@
-# ClinicAI — Complete Engineering Report
-**Version:** 3.0.0 (Sprint 3, Complete)
-**Date:** 2026-05-29
-**Prepared from:** Live codebase at `D:\ClinicAI`
+# ClinicAI — Engineering Report
+**Version:** 4.0.0
+**Date:** 2026-06-02
 
 ---
 
 ## 1. Project Overview
 
-ClinicAI is a WhatsApp-native clinical front-desk assistant built on FastAPI + LangGraph. It handles the full patient lifecycle — from first contact through appointment booking, day-of consultation orchestration, and post-visit follow-up — entirely over WhatsApp using Twilio as the messaging layer.
+ClinicAI is a WhatsApp-native clinical front-desk assistant and SaaS platform built on FastAPI + LangGraph. It handles the full patient lifecycle — from first contact through appointment booking, real-time consultation orchestration, clinical documentation, and post-visit follow-up — entirely over WhatsApp via Twilio, with a companion Next.js dashboard for clinic administrators and doctors.
 
-**Core premise:** A patient sends a WhatsApp message. ClinicAI classifies intent using a Groq-hosted LLaMA 3.3 70B model, routes to a specialist agent, manages multi-turn state in Redis, and replies with a contextually appropriate response. Doctors interact with the same WhatsApp interface to approve appointments, receive SOAP notes, and close consultations.
+**Core premise:** A patient sends a WhatsApp message. ClinicAI classifies intent using a Groq-hosted LLaMA 3.3 70B model, routes to a specialist agent, manages multi-turn state in Redis, and replies with a contextually appropriate response. Doctors interact with the same WhatsApp interface to approve appointments, receive SOAP notes, perform clinical review, and close consultations. The beta dashboard (Sprint 4) adds full multi-tenant SaaS onboarding, persistent patient profiles, and medical history browsing.
 
-**Sprint 1 scope:** Intent classification, multi-turn booking flow, appointment approval workflow, reminder + no-show recovery via APScheduler, clinical scribe (voice note → SOAP note PDF via Whisper + LLM + ReportLab), lab report parsing (PDF → LLM summary via pdfplumber + Groq).
+**Who uses it and how:**
 
-**Sprint 2 scope:** Full multi-agent refactor. RouterAgent dispatches to six specialist sub-agents. Net-new: ConsultationAgent (real-time doctor-patient consultation buffering with Jameel integration contract), AfterHoursAgent (message queue with morning flush), enhanced EmergencyAgent (doctor-side WhatsApp alert), FollowUpAgent, LabAgent. All Sprint 1 flows preserved through agent decomposition.
+| Actor | Interface | Primary Actions |
+|---|---|---|
+| Patient | WhatsApp | Book appointments, consult with AI assistant, receive follow-ups, submit lab reports |
+| Doctor | WhatsApp | Approve/reject bookings, review SOAP notes, REGEN command, voice note upload |
+| Clinic Admin | Next.js Dashboard | Onboarding, doctor management, AI model configuration, patient records browsing |
+| Super-Admin | Next.js /admin | Multi-tenant clinic oversight, activate/deactivate clinics |
 
-**Sprint 3 scope:** HL7 FHIR R4 + SNOMED CT validation pipeline for AI-generated prescriptions. A new `fhir_coding_node` is inserted in the scribe pipeline after entity extraction. It assigns authoritative SNOMED CT concept IDs to every diagnosis and symptom, and RxNorm RxCUIs to every medication, via a dedicated terminology lookup layer (local curated JSON tables → NLM public API fallback → `UNKNOWN` sentinel). The LLM is explicitly excluded from code assignment. FHIR R4 Condition and MedicationRequest resources are built programmatically and bundled as a valid FHIR R4 Bundle. Codes appear in the PDF and in the doctor's WhatsApp approval message. A new `REGEN` command lets the doctor request SOAP regeneration with correction feedback without re-recording audio.
+**Current state:** Beta — multi-clinic SaaS onboarding dashboard is live. Core WhatsApp flows are stable and production-tested. PostgreSQL persistence is complete. No CI/CD pipeline yet.
 
-**Stack:**
-- Runtime: Python 3.12, FastAPI, uvicorn
-- Agent framework: LangGraph 0.x (`StateGraph`, `MemorySaver`)
-- LLM: Groq LLaMA 3.3 70B (`llama-3.3-70b-versatile`), Gemini 2.5 Flash fallback
-- STT: Groq Whisper Large v3
-- Storage: Redis (primary), Python dicts (in-memory fallback)
+**Technology stack summary:**
+
+- Runtime: Python 3.12, FastAPI 0.115.5, uvicorn 0.32.1
+- Agent framework: LangGraph 0.3.5 (`StateGraph`, `MemorySaver`)
+- LLM: Groq LLaMA 3.3 70B (primary), Gemini 2.5 Flash (fallback), per-clinic override via DB
+- STT: Groq Whisper Large v3 / Whisper Large v3 Turbo
+- Database: PostgreSQL 16 via SQLAlchemy 2.0 async + asyncpg
+- Session store: Redis 7
 - Messaging: Twilio WhatsApp Business API
-- Scheduling: APScheduler BackgroundScheduler
-- PDF: ReportLab (generation), pdfplumber (extraction)
+- Scheduling: APScheduler 3.10.4 BackgroundScheduler
+- PDF: ReportLab (generation), pdfplumber + pytesseract (extraction/OCR)
+- Medical coding: SNOMED CT, RxNorm, HL7 FHIR R4
+- Dashboard: Next.js 16 App Router, TypeScript, Tailwind CSS, shadcn/ui, React Query
 
 ---
 
-## 2. End-to-End Flow
+## 2. Sprint History
 
-### Patient message path
+### Sprint 1 — Core WhatsApp Automation
 
-```
-Patient WhatsApp message
-    ↓
-Twilio webhook POST /webhook/twilio  [app/api/webhook_router.py:33]
-    ↓
-identify_sender()  [app/services/identity.py]
-    determines role: "doctor" | "patient"
-    ↓
-[if patient + text]
-router_graph.invoke(state_update, config={"configurable": {"thread_id": from_number}})
-    ↓
-RouterAgent: after_hours_check_node
-    → is_clinic_open()? [app/graph/agents/after_hours_agent.py]
-    → NO: queue_after_hours_message() → ack → END
-    → YES: continue
-    ↓
-intent_node
-    → classifier_graph.invoke() [app/graph/classifier.py]
-    → Groq LLaMA 3.3 70B → intent + confidence + entities
-    ↓
-session_node
-    → get_session() from Redis [app/services/store.py]
-    → create BookingSession if new
-    ↓
-route_after_session() conditional edge [app/graph/router.py:222]
-    → intent == "emergency"           → emergency_dispatch_node
-    → journey_state == CONSULTATION_ACTIVE
-      OR intent == "consultation_message" → consultation_dispatch_node
-    → intent == "lab_report_share"    → lab_dispatch_node
-    → intent in followup/prescription → followup_dispatch_node
-    → everything else                 → booking_dispatch_node
-    ↓
-sub-agent graph executes → returns reply_message
-    ↓
-webhook_router persists last_bot_response to Redis [webhook_router.py:98–106]
-    ↓
-send_whatsapp_message(to=From, body=reply) [app/services/whatsapp.py]
-    ↓
-TwiML empty <Response/> returned to Twilio [webhook_router.py:118]
-```
+- **Intent classifier** — 6-node LangGraph `StateGraph`; classifies inbound messages into: booking, consultation, emergency, lab report, follow-up, general.
+- **Appointment booking state machine** — 10-state finite state machine: `GREETING → COLLECTING_INFO → COLLECT_DATE_TIME → COLLECT_DOCTOR_PREFERENCE → CONFIRM_SLOT → WAITING_DOCTOR_APPROVAL → BOOKED` plus `CANCEL_CONFIRM`, `RESCHEDULE_INIT`, `RESCHEDULE_CONFIRM`. Full round-trip with doctor approval via Twilio Content Template interactive buttons (Approve / Reject / Suggest Time).
+- **Doctor approval workflow** — Twilio interactive buttons sent to doctor's WhatsApp; button payload parsed by webhook to advance booking state machine.
+- **Google Calendar integration** — Optional; creates calendar events on booking confirmation. Controlled by `GOOGLE_CALENDAR_ENABLED` env var.
+- **APScheduler jobs** — Appointment reminders (configurable minutes before), no-show recovery, after-hours message flush, weekly clinical insights per doctor.
+- **Standalone clinical scribe** — Voice note (OGG) → Groq Whisper transcription → LLM SOAP note generation → ReportLab PDF → WhatsApp delivery to doctor.
+- **Lab report parsing** — PDF upload → pdfplumber text extraction + pytesseract OCR fallback → panel detection (CBC/LFT/KFT/LIPID/THYROID) → LLM structured extraction → abnormal/critical flagging → summary delivery.
+- **Redis session store** — Multi-turn conversation state persisted per phone number with TTL.
 
-### Doctor message path
+### Sprint 2 — Multi-Agent Refactor
 
-```
-Doctor WhatsApp message (identified by phone number in DOCTOR_WHATSAPP_NUMBERS env)
-    ↓
-[if audio media] → handle_doctor_voice_note() [app/services/clinical_scribe.py:36]
-    → _try_buffer_doctor_audio() — scans Redis for active ConsultationSession
-        → if found: buffer audio_url as ConsultationMessage(sender_role="doctor")
-        → if not found: run scribe pipeline (Whisper → SOAP → PDF → approval buttons)
-[if text/button] → handle_doctor_message() [app/services/doctor.py]
-    → button tap → SOAP or appointment approval
-    → APPROVE/REJECT {id} → soap_approval or appointment_approval
-    → "setup doctor" → doctor_setup onboarding
-    → YES/NO → appointment_approval.handle_doctor_approval_reply()
-```
+- **RouterAgent** — Top-level LangGraph agent replaces monolithic intent classifier. Dispatches to six specialist sub-agents based on classified intent.
+- **Six sub-agents:**
+  - `BookingAgent` — full appointment booking state machine
+  - `ConsultationAgent` — real-time doctor-patient consultation buffering; integrates Jameel scribe contract
+  - `EmergencyAgent` — immediate WhatsApp alert to on-call doctor
+  - `LabAgent` — PDF/image lab report pipeline
+  - `FollowUpAgent` — post-consultation follow-up scheduling and reminders
+  - `AfterHoursAgent` — queues messages received outside clinic hours; flushes at opening
+- **Jameel scribe integration contract** — Defined API boundary between ConsultationAgent session close and external scribe pipeline; enables parallel scribe development.
+- **ConsultationAgent session management** — `ConsultationSession` dataclass buffered in Redis (4h TTL); accumulates all messages with `sender_role` tagging.
+- **AfterHoursAgent flush job** — APScheduler job reads queued after-hours messages at `CLINIC_OPEN_HOUR` and processes them.
+- **Enhanced EmergencyAgent** — Sends WhatsApp alert to all registered doctor numbers with patient phone and summary.
+- **Weekly insights job** — Per-doctor APScheduler weekly job summarizes consultation volume and common complaint categories.
+
+### Sprint 3 — Medical Coding and FHIR
+
+- **HL7 FHIR R4 Bundle generation** — `fhir_coding_node` added to scribe pipeline after entity extraction. Builds valid FHIR R4 `Bundle` containing `Condition` and `MedicationRequest` resources programmatically.
+- **SNOMED CT coding** — Every diagnosis and symptom receives an authoritative SNOMED CT concept ID. LLM is explicitly excluded from code assignment; the coding layer uses a deterministic lookup chain.
+- **RxNorm coding** — Every medication receives an RxNorm RxCUI via the same lookup chain.
+- **`terminology.py` three-tier lookup:**
+  1. Local curated JSON tables (instant, offline)
+  2. NLM public UMLS/RxNav API (network, authoritative)
+  3. `UNKNOWN` sentinel (never hallucinates a code)
+- **`REGEN` command** — Doctor sends `REGEN <feedback>` via WhatsApp to trigger SOAP regeneration using original audio transcription plus correction feedback, without re-recording.
+- **Multi-doctor registry** — 14 specialty types; doctor routing supports preference-matching during booking.
+- **SOAP codes in output** — SNOMED/RxNorm codes appear in both the PDF report and the doctor's WhatsApp approval message.
+
+### Sprint 4 — Beta Dashboard and Persistent Data Layer (Current)
+
+- **PostgreSQL data layer** — SQLAlchemy 2.0 async ORM, 6 models: `Clinic`, `ClinicUser`, `Doctor`, `ModelConfig`, `Patient`, `MedicalRecord`. Alembic for migrations.
+- **JWT authentication** — `python-jose` HS256 tokens, 7-day expiry, bcrypt password hashing via passlib. Full `GET /me`, login, and signup flows.
+- **Clinic management APIs** — `/api/clinics` CRUD; soft-delete pattern (`is_active=False`).
+- **Doctor management APIs** — `/api/clinics/{clinic_id}/doctors` CRUD with all scheduling fields.
+- **Patient management APIs** — `/api/clinics/{clinic_id}/patients` — paginated list, phone lookup, full profile detail, medical records timeline.
+- **LLM config API with encrypted keys** — `/api/clinics/{clinic_id}/config` — per-clinic vendor/model/STT selection; API keys encrypted with Fernet (AES-128-CBC) before storage; never returned in plain text; `POST /test` validates live connection.
+- **Unified doctor identity** — `identity.py` checks `DOCTOR_WHATSAPP_NUMBERS` env var first, then falls back to async DB query against `doctors` table. Enables full DB-driven doctor management without env var changes.
+- **Persistent patient profiles** — `patient_service.py` `upsert_patient()` creates or updates `Patient` row on every WhatsApp interaction. Name captured during booking flow and stored.
+- **Automatic medical history** — `save_consultation_record()` called on every ConsultationAgent close; `save_lab_record()` called on every lab report parse. Both write `MedicalRecord` rows to PostgreSQL with full structured data.
+- **Next.js 16 dashboard** — Full App Router SPA with sidebar navigation, JWT-gated routes, shadcn/ui component library.
+- **5-step onboarding wizard** — Clinic → Doctors → Twilio → AI Model → Done.
+- **Patient list and detail views** — Searchable/paginated patient table; detail view shows SOAP history, diagnosis chips (SNOMED codes), lab result color-coding (normal/abnormal/critical), allergies, chronic conditions, doctor notes.
+- **Docker Compose** — Four services: `postgres:16-alpine`, `redis:7-alpine`, `api`, `dashboard`.
 
 ---
 
-## 3. Architecture Overview
+## 3. Architecture
+
+### 3.1 System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  Twilio WhatsApp Business API                                         │
-│  POST /webhook/twilio                                                 │
-└──────────────────────┬───────────────────────────────────────────────┘
-                       │
-              ┌────────▼────────┐
-              │ webhook_router  │  app/api/webhook_router.py
-              │ identify_sender │
-              └────┬────────────┘
-                   │ patient text
-        ┌──────────▼──────────────────────────────────────────────┐
-        │                    RouterAgent                           │
-        │                app/graph/router.py                       │
-        │                                                          │
-        │  START → after_hours_check → intent_node → session_node │
-        │                             ↓                            │
-        │          route_after_session() conditional edge          │
-        └──────┬────────┬───────┬─────────┬────────┬─────────────┘
-               │        │       │         │        │
-        ┌──────▼──┐ ┌───▼───┐ ┌─▼────┐ ┌─▼─────┐ ┌▼──────────┐
-        │Booking  │ │Consult│ │Lab   │ │Follow │ │Emergency  │
-        │Agent    │ │Agent  │ │Agent │ │Up     │ │Agent      │
-        └─────────┘ └───────┘ └──────┘ └───────┘ └───────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  WHATSAPP CHANNEL                                               │
+│                                                                 │
+│  Patient Device          Doctor Device                          │
+│  (WhatsApp)              (WhatsApp)                             │
+└──────────┬───────────────────────┬──────────────────────────────┘
+           │                       │
+           └───────────┬───────────┘
+                       ↓
+              Twilio WhatsApp API
+                       ↓
+         POST /webhook/twilio  [webhook_router.py]
+                       ↓
+         identify_sender_async()
+         ┌─────────────┴──────────────┐
+         │  env var lookup first      │
+         │  DB fallback (doctors tbl) │
+         └─────────────┬──────────────┘
+                       ↓
+           ┌───────────┴────────────┐
+           │                        │
+        PATIENT                   DOCTOR
+           │                        │
+           ↓                        ↓
+   router_graph (LangGraph)   handle_doctor_message()
+   after_hours_check               │
+        ↓                    ┌─────┴──────────────────┐
+   intent_node               │  Approval button       │
+   (6-class classifier)      │  SOAP review           │
+        ↓                    │  REGEN <feedback>      │
+   session_node              │  Voice note upload     │
+        ↓                    └────────────────────────┘
+   dispatch:
+   ┌──────────────────────────────────────┐
+   │ BookingAgent      → Google Calendar  │
+   │ ConsultationAgent → Redis session    │
+   │ EmergencyAgent    → Doctor alert     │
+   │ LabAgent          → OCR pipeline     │
+   │ FollowUpAgent     → APScheduler      │
+   │ AfterHoursAgent   → queue/flush      │
+   └──────────────────────────────────────┘
+           │
+           ↓  (on ConsultationAgent close)
+   scribe_service pipeline:
+     transcribe_audio_node
+     → soap_generator_node
+     → extract_entities_node
+     → fhir_coding_node (SNOMED + RxNorm)
+     → grounding_check_node
+     → followup_generator_node
+     → pdf_output_node
+           │
+           ↓
+   patient_service.save_consultation_record()
+           │
+           ↓
+     PostgreSQL (MedicalRecord row)
 
-        classifier_graph (all intents run through this)
-        app/graph/classifier.py
-        validate → preprocess → classify(Groq) → postprocess|fallback(Gemini)
+┌─────────────────────────────────────────────────────────────────┐
+│  DASHBOARD CHANNEL                                              │
+│                                                                 │
+│  Clinic Admin / Doctor Browser                                  │
+│         ↓                                                       │
+│  Next.js Dashboard (port 3000)                                  │
+│    /auth/login → POST /api/auth/login → JWT                     │
+│    /onboarding/* → 5-step wizard                                │
+│    /dashboard → clinic stats, doctor cards                      │
+│    /dashboard/doctors → CRUD                                    │
+│    /dashboard/patients → list → [id] detail + history           │
+│    /dashboard/config → LLM model selection + key test           │
+│    /admin → superadmin multi-tenant oversight                   │
+│         ↓                                                       │
+│  FastAPI Management APIs (port 8000)                            │
+│    /api/auth  /api/clinics  /api/doctors                        │
+│    /api/config  /api/patients                                   │
+└─────────────────────────────────────────────────────────────────┘
 
-        ┌────────────────────────────────────────┐  ┌──────────────────────────────┐
-        │ ScribePipeline (7 nodes, Sprint 3)     │  │ ParserPipeline               │
-        │ app/graph/scribe/                      │  │ app/graph/parser/            │
-        │ transcribe → soap_generator            │  │ pdfplumber→Groq→summary      │
-        │ → extract_entities                     │  └──────────────────────────────┘
-        │ → fhir_coding  ← NEW (Sprint 3)        │
-        │   (terminology lookup, no LLM)         │
-        │ → grounding_check                      │
-        │ → followup_generator → pdf             │
-        └────────────────────────────────────────┘
-
-        ┌────────────────────────────────────────┐
-        │ TerminologyService  (Sprint 3)          │
-        │ app/services/terminology.py             │
-        │ lookup_snomed(term)                     │
-        │   local JSON → NLM Clinical Tables API  │
-        │   → UNKNOWN                             │
-        │ lookup_rxnorm(drug)                     │
-        │   local JSON → NLM RxNorm API           │
-        │   → UNKNOWN                             │
-        │ data/terminology/snomed.json  (100+ terms)│
-        │ data/terminology/rxnorm.json  (80+ drugs)│
-        └────────────────────────────────────────┘
-
-        ┌────────────────────────────────────────────────────────┐
-        │  APScheduler BackgroundScheduler                        │
-        │  app/services/scheduler.py                              │
-        │  · reminder_{appt_id}           DateTrigger            │
-        │  · noshow_1hr_{appt_id}         DateTrigger            │
-        │  · noshow_24hr_{appt_id}        DateTrigger            │
-        │  · consult_timeout_{patient}    DateTrigger            │
-        │  · afterhours_flush_{doctor}    CronTrigger daily      │
-        │  · weekly_insights_{doctor}     CronTrigger weekly Mon │
-        └────────────────────────────────────────────────────────┘
-
-        ┌────────────────────────────────────────────────────────┐
-        │  Redis (clinicai: namespace)                            │
-        │  session:{phone}      TTL 86400s                       │
-        │  appt:{id}            no TTL                           │
-        │  approval:{id}        no TTL                           │
-        │  soap:{id}            TTL 604800s                      │
-        │  lab:{id}             TTL 604800s                      │
-        │  consult:{phone}      TTL 14400s  (Sprint 2)           │
-        │  afterhours:{doctor}  TTL 129600s (Sprint 2)           │
-        └────────────────────────────────────────────────────────┘
+Shared Infrastructure:
+  PostgreSQL 16  ←── SQLAlchemy async ORM (asyncpg driver)
+  Redis 7        ←── Conversation sessions, booking state, queues
+  APScheduler    ←── Reminders, flush jobs, weekly insights
 ```
 
----
-
-## 4. Codebase Breakdown
-
-### Entry point
-
-**`main.py`** — FastAPI application factory. Uses `_optional_attr()` to load modules gracefully (any missing module is skipped, not a startup crash). Lifespan context manager starts APScheduler, calls `schedule_afterhours_flush(doc_num)` for every configured doctor, logs Sprint 2 agent names. Includes `classifier_router`, `webhook_router`, `parser_router` in sequence. Exposes `GET /` health check and `GET /graph/nodes` debug endpoint.
-
-### API layer (`app/api/`)
-
-**`webhook_router.py`** — All Twilio interactions. Receives `From`, `Body`, `NumMedia`, `MediaUrl0`, `MediaContentType0`, `ButtonPayload` via Form parameters. Routing priority: doctor+audio → voice note scribe; doctor+text → doctor command handler; patient+PDF → lab report parser; patient+text → `router_graph.invoke()`. After invocation, serializes `last_bot_response` back to Redis for context-aware classification on the next turn. Debug endpoints at `/debug/sessions`, `/debug/appointments`, `/debug/identity`, `/debug/pending-approvals`, `/debug/doctors`, `/debug/consultations`. PDF download at `/lab-report/pdf/{id}` and `/scribe/pdf/{id}`.
-
-**`classifier_router.py`** — Direct HTTP interface for testing the classifier. `POST /classify` accepts `ClassifyRequest`, runs `classifier_graph.invoke()`, returns `ClassifyResponse`. Not used in the WhatsApp flow.
-
-**`parser_router.py`** — Direct upload interface for lab PDFs. `POST /parse-lab-report`.
-
-**`scribe_router.py`** — Jameel's scribe API endpoint. `POST /scribe/consult` accepts a `ConsultationBundleRequest` (patient_id, doctor_id, messages, audio_files), calls `scribe_service.process_consultation_bundle()`, and returns `ScribeResult` (soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp). When the two services are eventually deployed independently, `JAMEEL_SCRIBE_URL` is set to point here and the integration switches from local function call to HTTP without any other code change.
-
-### Graph layer (`app/graph/`)
-
-**`classifier.py`** — Intent classification pipeline. 6-node LangGraph: `validate_node` (empty/too-short rejection) → `preprocess_node` (strip whitespace, normalize) → `classify_node` (Groq LLaMA 3.3 70B, temperature=0.1, max_tokens=512) → `postprocess_node` (normalize output) | `fallback_node` (Gemini 2.5 Flash if Groq fails or returns invalid JSON). State type: `ClassifierState`. Context-aware: passes `context_message` (previous bot response) as part of the system prompt so the LLM can see the conversational context. `_sanitise_multi_result()` handles both `{"intent": "..."}` (legacy) and `{"intents": [...]}` (new multi-intent) formats. Compiled once at import as `classifier_graph`.
-
-**`router.py`** — RouterAgent, the top-level orchestrator. 8 nodes: `after_hours_check_node`, `intent_node`, `session_node`, `booking_dispatch_node`, `consultation_dispatch_node`, `emergency_dispatch_node`, `lab_dispatch_node`, `followup_dispatch_node`. Uses `MemorySaver()` for per-thread checkpointing (thread_id = patient phone number). Consultation agent is imported lazily inside `consultation_dispatch_node` to break the circular import chain. `_invoke_sub_agent(graph, state)` normalizes the full BookingState dict before passing to sub-agent to prevent KeyError on missing fields. Compiled as `router_graph`.
-
-**`booking.py`** — Backward-compatibility shim. Single line: `from app.graph.router import router_graph as booking_graph`. Any external code importing `booking_graph` still works.
-
-**`agents/booking_agent.py`** — Core multi-turn booking state machine. Nodes: `off_topic_node`, `flow_node`, `confirm_node`, `cancel_node`, `reschedule_node`, `appointment_status_node`. Receives pre-classified intent from the router — no internal classifier call. `flow_node` is the main workhorse: reads `session.state` and advances through GREETING → COLLECTING_INFO → COLLECT_DATE_TIME → CONFIRM_SLOT → WAITING_DOCTOR_APPROVAL → BOOKED using `MSG_*` string templates and entity extraction via `BOOKING_ENTITY_PROMPT`. When slot is confirmed, calls `appointment_approval.request_doctor_approval()`. Compiled without MemorySaver — state threading is the router's responsibility.
-
-**`agents/consultation_agent.py`** — Sprint 2 core. `CLOSING_PHRASES` set with 14 Hindi/English terms. `start_or_resume_node`: loads or creates `ConsultationSession`, buffers incoming patient message as `ConsultationMessage(sender_role="patient")`, calls `schedule_consultation_timeout()`, sets `journey_state = CONSULTATION_ACTIVE` on `BookingSession`. `detect_end_node`: checks `session.is_active` (may have been set False by timeout job) and `_is_closing_phrase()`. `finalize_node`: calls `finalize_and_send(patient_number)` via `asyncio.run()` in a `ThreadPoolExecutor` to handle the case where FastAPI's event loop is already running. `ack_node`: in-progress acknowledgement to patient. Graph: START → start_or_resume → detect_end → [finalize | ack] → END.
-
-**`agents/emergency_agent.py`** — Stateless one-shot. Sends "Call 112" response to patient. Loops `all_doctor_numbers()` and sends emergency alert WhatsApp message to each doctor.
-
-**`agents/after_hours_agent.py`** — `is_clinic_open()` reads `CLINIC_OPEN_HOUR` and `CLINIC_CLOSE_HOUR` env vars, checks `datetime.now(ZoneInfo("Asia/Kolkata")).hour`. `queue_node` calls `queue_after_hours_message()`. `ack_node` returns a templated closed-clinic message with computed hours.
-
-**`agents/followup_agent.py`** — Handles `followup_query` and `prescription_request` intents. Checks `session.journey_state == "POST_CONSULT"` for context-appropriate response. Falls back to `bot_response` from classifier or generic "book an appointment" message.
-
-**`agents/lab_agent.py`** — Thin wrapper for when `lab_report_share` intent arrives but no PDF is attached. Prompts patient to forward the PDF.
-
-**`scribe/`** — LangGraph pipeline for clinical SOAP generation. `pipeline.py` compiles a **7-node** graph (Sprint 3 added `fhir_coding_node`): `transcribe_node` (Groq Whisper API) → `soap_generator_node` (LLaMA 3.3 70B) → `extract_entities_node` (LLaMA — extracts symptoms/medications/diagnoses as structured JSON) → `fhir_coding_node` (terminology lookup, **no LLM**) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (ReportLab). `nodes.py` exports two confidence helpers: `overall_soap_confidence(soap_note)` and `low_confidence_section_names(soap_note)`. Also exports `fhir_coding_node` and private helpers `_validate_fhir_bundle`, `_build_condition_entry`, `_build_medication_request_entry`, `_parse_dose`, `_FREQUENCY_MAP`. State in `state.py` as `ScribeState` TypedDict — Sprint 3 added `fhir_bundle: Optional[dict]`, `snomed_mappings: Optional[list]`, `fhir_validation_errors: list[str]`.
-
-**`parser/`** — LangGraph pipeline for lab report extraction. `pipeline.py` compiles: PDF text extraction (pdfplumber) → LLM summary (Groq). State in `state.py`.
-
-### Service layer (`app/services/`)
-
-**`store.py`** — Dual persistence layer. Attempts Redis connection at import (`_connect_redis()`); falls back silently to in-memory dicts. All public functions have identical signatures regardless of backend. Key prefix `clinicai:`. Sprint 2 adds `_consultations: dict` and `_after_hours_queues: dict` in-memory fallbacks, plus 7 new public functions for consultation and after-hours queue management.
-
-**`scheduler.py`** — APScheduler BackgroundScheduler. Sprint 1: reminder jobs (`reminder_{id}` via DateTrigger), no-show jobs (`noshow_1hr_{id}`, `noshow_24hr_{id}` via DateTrigger). Sprint 2: consultation timeout jobs (`consult_timeout_{patient}` via DateTrigger, `replace_existing=True` so `reset_consultation_timeout()` just calls `schedule_consultation_timeout()` again), after-hours flush jobs (`afterhours_flush_{doctor}` via CronTrigger at `CLINIC_OPEN_HOUR:00 IST`). Also: weekly practice insights (`weekly_insights_{doctor}` via CronTrigger `day_of_week="mon"` at `WEEKLY_INSIGHTS_HOUR:00 IST`). The insights job aggregates 7-day appointment data per doctor — total count, past vs. upcoming, estimated no-shows (heuristic: slot passed + `reminder_sent=True` + no `last_active` activity after appointment time), busiest day, busiest time slot (Morning/Afternoon/Evening), top 3 symptoms — and sends a formatted WhatsApp report. `_resolve_appointment_datetime()` handles today/aaj, tomorrow/kal, parso, and explicit month+day with year.
-
-**`consultation_service.py`** — New in Sprint 2. `build_consultation_bundle()` serializes the `ConsultationSession` into Jameel's integration contract (patient_id, doctor_id, messages array, audio_files array). `_call_jameel()` dispatches based on `JAMEEL_SCRIBE_URL`: if set, POSTs the bundle to the external API (60s timeout); if empty, calls `scribe_service.process_consultation_bundle()` directly in-process — no stub, no HTTP hop, the real pipeline runs. `finalize_and_send()` orchestrates: load session → build bundle → call `_call_jameel()` → compose doctor summary (appends `⚠️ Low confidence warning: [Section]` if `low_confidence_sections` is non-empty) → send via WhatsApp → set `journey_state = "POST_CONSULT"` on `BookingSession` → delete `ConsultationSession` from Redis. Returns patient-facing reply string.
-
-**`scribe_service.py`** — New (Jameel's side). The full consultation-to-SOAP pipeline:
-1. Downloads every audio file from the bundle via httpx (Twilio basic auth)
-2. Transcribes each file using Groq Whisper (`asyncio.to_thread` to avoid blocking FastAPI's event loop)
-3. `_build_combined_transcript()` merges all messages in order, prefixing each line with `PATIENT:` or `DOCTOR:` so the LLM understands who spoke
-4. Calls `soap_generator_node` → `extract_entities_node` → `fhir_coding_node` (Sprint 3) → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` directly (plain functions, no need to re-run the full LangGraph pipeline)
-5. Computes `overall_soap_confidence(soap_note)` and `low_confidence_section_names(soap_note)` from `nodes.py` helpers
-6. Stores the PDF via `store_scribe_pdf()` and builds the public URL
-7. Returns `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp, clinical_entities, overall_confidence, low_confidence_sections, fhir_bundle, snomed_mappings, fhir_validation_errors}` (last three are Sprint 3 additions)
-Cleans up all temp audio files regardless of success or failure.
-
-**`clinical_scribe.py`** — Doctor voice note handler. Sprint 2 added pre-check: `_try_buffer_doctor_audio()` scans `clinicai:consult:*` Redis keys, matches `session.doctor_number == doctor_number`, buffers audio as `ConsultationMessage(sender_role="doctor")` and appends to `session.audio_files`. If active consultation found, returns ack and skips local scribe pipeline. Local scribe pipeline: download audio (httpx with Twilio auth) → `_run_scribe_pipeline()` → extract patient number from caption or appointment lookup → save pending SOAP → send PDF + approval buttons to doctor. Sprint 3: pending SOAP record now also stores `transcript`, `clinical_entities`, `fhir_bundle`, `snomed_mappings` to enable REGEN without re-transcribing audio. The text-fallback approval message now includes a SNOMED CT / RxNorm summary block and a `REGEN` command hint. `_format_fhir_whatsapp_summary(snomed_mappings, fhir_bundle)` is a module-level helper that formats the coded-entities block (capped at 4 items each to respect WhatsApp message limits).
-
-**`appointment_approval.py`** — Approval workflow. `request_doctor_approval()` generates `APT{5-char}` approval ID, checks slot availability via Google Calendar or local scan, sends Twilio Content Template (interactive buttons) or text fallback. `handle_doctor_approval_reply()` parses `YES APT{id}` / `NO APT{id}` text. `handle_appointment_button_reply()` handles `apt_approve` / `apt_reject` payloads. `_approve()` creates `AppointmentRecord`, schedules reminder and no-show jobs, notifies patient. `_reject()` prompts patient for new slot.
-
-**`soap_approval.py`** — SOAP approval workflow. `handle_soap_approval_reply()` parses `APPROVE RX{id}` / `REJECT RX{id}` / `REGEN RX{id} {feedback}` (Sprint 3). `handle_soap_button_reply()` handles `soap_approve` / `soap_reject`. On approve: sends PDF to patient via `send_whatsapp_media_sync()`. On `REGEN`: `_regen(soap_id, feedback)` re-runs the SOAP + FHIR coding pipeline from the stored transcript (no audio required), overwrites the existing PDF in-place so the same URL stays valid, updates the Redis record, and sends the regenerated PDF to the doctor for re-review.
-
-**`terminology.py`** — New in Sprint 3. Authoritative terminology lookup service. `lookup_snomed(term)` and `lookup_rxnorm(drug_name)` follow a three-step lookup: (1) local curated JSON table (`data/terminology/snomed.json` / `data/terminology/rxnorm.json`) — fast, offline, version-controlled; (2) NLM public API (`clinicaltables.nlm.nih.gov` for SNOMED CT, `rxnav.nlm.nih.gov` for RxNorm) — authoritative fallback for unmapped terms, ~100–200ms per call via `httpx`; (3) `UNKNOWN` sentinel — non-blocking, pipeline always completes. Results are cached in-process for the session lifetime. The LLM must not be used for code assignment; this module is the only code path that assigns SNOMED concept IDs or RxCUIs.
-
-**`identity.py`** — Sender identity resolution. Reads `DOCTOR_WHATSAPP_NUMBERS` env var (format: `"Dr Name:+91xxx,Dr Name2:+91xxx2"`). `identify_sender()` normalizes the raw Twilio `From` field and returns `SenderIdentity(phone_number, role, display_name)`. `find_doctor_number()` does fuzzy name match. `find_doctor_name()` does reverse lookup. `all_doctor_numbers()` returns list of all configured phone numbers.
-
-**`doctor.py`** — Doctor command router. Priority order: button taps → SOAP/appointment approval; text pattern SOAP approval; "setup doctor" → doctor_setup; `OK LAB{id}` → lab review; `YES`/`NO` → appointment_approval; help/today's appointments/pending approvals; greetings.
-
-**`doctor_setup.py`** — 5-step doctor onboarding via WhatsApp: name, google email, working hours, appointment duration, buffer. Stored as `doctor_profile` dict under `clinicai:doctor_profile:{number}`.
-
-**`whatsapp.py`** — Three send functions. `send_whatsapp_message_sync(to, body)`: normalizes to `whatsapp:+...` format, creates `TwilioClient` with env creds, mock mode if no creds. `send_whatsapp_media_sync(to, body, media_url)`: same + `media_url` parameter. `send_whatsapp_template_sync(to, content_sid, content_variables)`: Twilio Content Templates (interactive buttons). All have `async` wrappers that run sync version in thread executor.
-
-**`google_calendar.py`** — `calendar_enabled()` checks `GOOGLE_CALENDAR_ENABLED=True`. `check_google_availability()` queries Google Calendar API for conflicts. `create_google_calendar_event()` creates event on doctor's calendar. `suggest_google_slots()` finds nearest available slots. Entire module is no-op when `GOOGLE_CALENDAR_ENABLED=False`.
-
-**`pdf_service.py`** — Lab report PDF handler. `handle_incoming_pdf(media_url, from_number)`: downloads PDF (Twilio auth), runs parser pipeline, stores result, sends LLM summary to patient, creates pending lab review for doctor notification.
-
-### Schema layer (`app/schemas/__init__.py`)
-
-All type definitions in one file:
-- `ClassifierState` (TypedDict) — LangGraph state for classification pipeline
-- `BookingState` (TypedDict) — LangGraph state for all booking/routing pipelines; `pipeline_log` uses `Annotated[list, operator.add]` so each node appends rather than replaces
-- `BookingSession` (Pydantic v2 BaseModel) — per-patient Redis session
-- `AppointmentRecord` (Pydantic v2 BaseModel) — confirmed appointment
-- `ClassifyRequest/Response`, `Entities`, `IntentResult` — API request/response types
-- `ConsultationMessage` (Pydantic v2 BaseModel) — single message with `sender_role: Literal["doctor", "patient"]`
-- `ConsultationSession` (Pydantic v2 BaseModel) — full consultation with messages buffer, audio_files, is_active flag, ended_reason
-- `BOOKING_FLOW_STATES` (list of 10) — granular booking sub-flow states
-- `PATIENT_JOURNEY_STATES` (list of 7) — high-level patient lifecycle states
-- `ALL_INTENTS` (list of 10) — full intent taxonomy
-
-### Prompt layer (`app/prompts/__init__.py`)
-
-**`CLASSIFIER_SYSTEM_PROMPT`** — ~150-line prompt. Security section: explicit injection detection rules, flags messages with role instructions or prompt overrides. Taxonomy: 10 intents with examples, Hinglish handling (bilingual), relational terms exclusion (`mummy ki appointment` maps to patient booking intent, not a different patient). Entity extraction rules: `requested_date` relative terms (today/aaj, tomorrow/kal, parso), `requested_time` with 12/24hr, `symptoms_mentioned` as list. Output format: `{"intents": [{"intent": ..., "confidence": ..., "entities": {...}, "bot_response": ...}]}`. Context awareness: if `context_message` provided, uses it to disambiguate incomplete follow-up messages.
-
-**`CLASSIFIER_FEW_SHOT`** — 9 few-shot examples covering: emergency in Hinglish, multi-intent booking+followup, relational terms, consultation messages during active session, injection attempt.
-
-**`BOOKING_ENTITY_PROMPT`** — Entity extraction for booking: date normalization, time normalization, doctor name extraction, "same day"/"usi din" resolution.
-
-**Note (Sprint 3):** `FHIR_CODING_PROMPT` was removed. SNOMED CT and RxNorm codes are no longer assigned by the LLM. All code assignment is delegated to `app/services/terminology.py` which queries authoritative sources (local curated tables and NLM public APIs). This is an intentional architectural constraint: the LLM extracts entity *names*; the terminology service assigns *codes*.
-
----
-
-## 5. Backend Execution Flow
-
-### Detailed flow: New patient books appointment
-
-```
-1. Patient: "Hi, I want to see Dr Jameel tomorrow at 10am"
-
-2. webhook_router.py:33 — POST /webhook/twilio
-   identify_sender("+919876543210") → role=patient
-
-3. router_graph.invoke({"from_number": "+919876543210", "incoming_message": "..."})
-   thread_id = "+919876543210"  (MemorySaver checkpoint key)
-
-4. after_hours_check_node [router.py:47]
-   is_clinic_open() → True (9am–8pm IST check)
-   → pipeline_log: ["router: clinic open — continuing"]
-
-5. intent_node [router.py:73]
-   get_session("+919876543210") → None (new patient)
-   context_message = None
-   classifier_graph.invoke({...})
-     validate_node: len("Hi I want...") > 0 → is_valid=True
-     preprocess_node: strip/normalize
-     classify_node: Groq LLaMA3.3-70B call
-       → intent="appointment_book", confidence=0.94
-       → entities={patient_name: None, doctor_name: "Dr Jameel",
-                   requested_date: "tomorrow", requested_time: "10am"}
-   → state: intent="appointment_book", extracted_entities={...}
-
-6. session_node [router.py:112]
-   get_session("+919876543210") → None
-   → creates BookingSession(from_number="+919876543210", state="GREETING", journey_state="NEW_PATIENT")
-   → save_session() → Redis clinicai:session:+919876543210 TTL 86400s
-   → is_new_session=True, current_booking_state="GREETING"
-
-7. route_after_session [router.py:222]
-   intent="appointment_book" → booking_dispatch_node
-
-8. booking_dispatch_node [router.py:163]
-   _invoke_sub_agent(booking_agent_graph, state)
-   booking_agent_graph.invoke({...})
-     route_from_start(): intent="appointment_book", state="GREETING"
-       → flow_node
-     flow_node:
-       session.state = "GREETING"
-       → asks patient name (MSG_GREETING_BOOK)
-       → state transitions to COLLECTING_INFO
-       → save_session()
-   reply_message = "Welcome to ClinicAI! I'm happy to help you book..."
-
-9. webhook_router.py:98–106
-   sess_dict["last_bot_response"] = reply[:300]
-   save_session(BookingSession(**sess_dict))
-
-10. send_whatsapp_message(to="whatsapp:+919876543210", body=reply)
-    Twilio API call → patient receives message
-```
-
-### Detailed flow: Consultation lifecycle
-
-```
-1. Patient sends: "doctor mujhe sir dard ho raha hai"
-   → classifier: intent="consultation_message", confidence=0.89
-
-2. session.journey_state == "NEW_PATIENT"
-   route_after_session → intent == "consultation_message"
-   → consultation_dispatch_node
-
-3. consultation_agent.start_or_resume_node:
-   get_consultation(patient_number) → None (no existing session)
-   get_latest_appointment_for_patient(patient_number)
-     → AppointmentRecord(doctor_name="Dr Jameel")
-   find_doctor_number("Dr Jameel") → "+919801581020"
-   ConsultationSession created:
-     consultation_id = "CONS" + 6-char uuid
-     patient_number = from_number
-     doctor_number = "+919801581020"
-     messages = [ConsultationMessage(sender_role="patient", text="doctor mujhe...")]
-   save_consultation(patient_number, new_session)
-   schedule_consultation_timeout(patient_number, consultation_id)
-     → APScheduler job: consult_timeout_{patient_number}
-     → fires at now + CONSULTATION_TIMEOUT_MINUTES (2 min in demo, 30 min in prod)
-   booking.journey_state = "CONSULTATION_ACTIVE"
-   save_session(booking)
-
-4. consultation_agent.detect_end_node:
-   session.is_active = True
-   _is_closing_phrase("doctor mujhe sir dard...") = False
-   → no action
-
-5. route_after_detect: session.is_active=True → ack_node
-   → reply_message = "Message received — consultation in progress. 🩺\nThe doctor will respond shortly."
-
---- Doctor sends voice note during consultation ---
-
-6. Doctor voice note received at webhook:
-   handle_doctor_voice_note(media_url, "audio/ogg", "+919801581020", "Dr Jameel")
-
-7. _try_buffer_doctor_audio(media_url, "+919801581020"):
-   scan Redis clinicai:consult:*
-   find clinicai:consult:+919876543210
-   session.doctor_number == "+919801581020" ✓
-   ConsultationMessage(sender_role="doctor", audio_url=media_url) appended
-   session.audio_files.append({"url": media_url, "duration_secs": None})
-   save_consultation(patient_number, session)
-   return "🎙️ Voice note received and added to the active consultation buffer..."
-
---- Doctor sends "ok done" ---
-
-8. Doctor text "ok done" at webhook:
-   handle_doctor_message("ok done", "Dr Jameel", "+919801581020")
-   → handle_doctor_message routes to... (does not recognize as consultation close — doctor closing is currently in consultation_agent via patient-side message in demo mode)
-
-NOTE: In current implementation, closing phrase detection runs on patient messages.
-      Doctor close via text goes through handle_doctor_message, which does not yet
-      route to consultation_agent. For demo, patient sends "ok done" to trigger close.
-
-9. Patient sends: "ok done"
-   → classifier: intent="consultation_message" (or general_query)
-   → consultation_dispatch_node again
-
-10. start_or_resume_node: existing session found, buffer patient message
-
-11. detect_end_node:
-    session.is_active = True
-    _is_closing_phrase("ok done") = True
-    session.ended_reason = "closing_phrase"
-    session.is_active = False
-    save_consultation()
-    cancel_consultation_timeout(patient_number)
-
-12. route_after_detect: session.is_active=False → finalize_node
-
-13. finalize_node:
-    asyncio.get_event_loop().is_running() = True (FastAPI context)
-    → ThreadPoolExecutor: asyncio.run(finalize_and_send(patient_number))
-
-14. finalize_and_send [consultation_service.py:78]:
-    session = get_consultation(patient_number)
-    bundle = build_consultation_bundle(session)
-      → {patient_id, doctor_id, messages: [2 items], audio_files: [1 item]}
-    result = await _call_jameel(bundle)
-      → JAMEEL_SCRIBE_URL="" → scribe_service.process_consultation_bundle(bundle)
-        → _download_audio(audio_url) [Twilio auth, httpx]
-        → asyncio.to_thread(_transcribe_audio, path) [Groq Whisper]
-        → _build_combined_transcript(messages, audio_transcripts)
-            "PATIENT: sir dard ho raha\nDOCTOR: <transcription of voice note>"
-        → soap_generator_node(state) [LLaMA 3.3 70B → SOAP JSON]
-        → grounding_check_node(state) [LLaMA → verify sentences against transcript]
-        → followup_generator_node(state) [LLaMA → 2-3 follow-up questions]
-        → pdf_output_node(state) [ReportLab → PDF file]
-        → store_scribe_pdf(pdf_path) → document_id
-        → returns {soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp}
-    doctor_summary = "📋 ClinicAI — Consultation Summary\n\nPatient: +919876543210\n..."
-    send_whatsapp_message_sync("+919801581020", doctor_summary)
-    booking_session.journey_state = "POST_CONSULT"
-    save_session(booking_session)
-    delete_consultation(patient_number)
-    return "Your consultation has been recorded..."
-
-15. reply_message → patient receives confirmation
-    Doctor receives: WhatsApp message with summary + follow-up questions + PDF link
-```
-
-### Detailed flow: Consultation bundle → scribe pipeline (scribe_service.py)
-
-```
-Input: consultation_bundle = {
-  patient_id: "+919876543210",
-  doctor_id:  "+919801581020",
-  messages: [
-    {sender_role: "patient", text: "sir dard ho raha", audio_url: null},
-    {sender_role: "doctor",  text: null, audio_url: "https://api.twilio.com/..."},
-  ],
-  audio_files: [{url: "https://api.twilio.com/...", duration_secs: null}]
-}
-
-Step 1 — Download each audio file [scribe_service._download_audio()]:
-  httpx.AsyncClient.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
-  response.headers["content-type"] → "audio/ogg" → suffix=".ogg"
-  tempfile.mkstemp(suffix=".ogg") → /tmp/tmpXXXX.ogg
-
-Step 2 — Transcribe [scribe_service._transcribe_audio() via asyncio.to_thread]:
-  Groq(api_key).audio.transcriptions.create(
-    model="whisper-large-v3",
-    file=("tmpXXXX.ogg", bytes),
-    response_format="verbose_json",
-    prompt="clinic in India, Hinglish, medical abbreviations..."
-  )
-  → "Patient hai Suresh, BP thoda high hai, amlodipine start karte hain"
-  audio_transcripts[url] = "Patient hai Suresh..."
-
-Step 3 — Build combined transcript [_build_combined_transcript()]:
-  message[0]: sender_role=patient, text="sir dard ho raha"
-    → "PATIENT: sir dard ho raha"
-  message[1]: sender_role=doctor, audio_url=url
-    → audio_transcripts[url] = "Patient hai Suresh, BP thoda high hai..."
-    → "DOCTOR: Patient hai Suresh, BP thoda high hai..."
-  combined = "PATIENT: sir dard ho raha\nDOCTOR: Patient hai Suresh, BP thoda high hai..."
-
-Step 4 — SOAP generation [soap_generator_node()]:
-  ScribeState = {transcript: combined, doctor_name: "Dr Jameel", clinic_name: "ClinicAI"}
-  LLaMA 3.3 70B with SOAP_SYSTEM prompt
-  → soap_note = {
-      patient_name: "Suresh",
-      subjective: {content: "Patient Suresh presents with headache...", confidence: 0.75},
-      objective:  {content: "BP 140/90 mmHg", confidence: 0.9},
-      assessment: {content: "Hypertension stage 1", confidence: 0.85},
-      plan:       {content: "Amlodipine 5mg OD. Follow-up 2 weeks.", confidence: 0.95}
-    }
-  missing_sections: []
-
-Step 4b — Entity extraction [extract_entities_node()]:
-  LLaMA 3.3 70B with ENTITY_EXTRACT_SYSTEM prompt (SECURITY GUARDRAIL against injection)
-  Input: transcript + soap_note context
-  → clinical_entities = {
-      "symptoms":    [{"name": "headache", "severity": "mild", "duration": "since morning"}],
-      "medications": [{"name": "Amlodipine", "dose": "5mg", "frequency": "once daily"}],
-      "diagnoses":   ["Hypertension stage 1"]
-    }
-
-Step 4c — FHIR coding [fhir_coding_node()] (Sprint 3, no LLM):
-  For each diagnosis/symptom → terminology.lookup_snomed(term)
-    "Hypertension stage 1" → local table miss → NLM API → 38341003 | Hypertensive disorder
-    "headache" → local table hit → 25064002 | Headache (finding)
-  For each medication → terminology.lookup_rxnorm(drug_name)
-    "Amlodipine" → local table hit → RxCUI 17767, "amlodipine"
-  Builds FHIR R4 Bundle programmatically:
-    entry[0]: Condition (Hypertension, SNOMED 38341003, unconfirmed)
-    entry[1]: Condition (Headache, SNOMED 25064002, unconfirmed)
-    entry[2]: MedicationRequest (Amlodipine 5mg OD, RxNorm 17767, status=active)
-  Injects real UUIDs for all resource IDs
-  _validate_fhir_bundle() → 0 structural errors
-  → snomed_mappings: [{clinical_term, snomed_concept_id, snomed_fsn, fhir_resource_type, source}, ...]
-  → fhir_bundle: {resourceType: "Bundle", type: "collection", entry: [...]}
-
-Step 5 — Grounding check [grounding_check_node()]:
-  LLaMA checks every SOAP sentence against the transcript
-  → grounding_report: [{sentence: "BP 140/90", transcript_segment: "BP thoda high", is_grounded: true}, ...]
-  → ungrounded_flags: [] (all grounded)
-
-Step 6 — Follow-up questions [followup_generator_node()]:
-  LLaMA generates patient-friendly questions from assessment + plan
-  → follow_up_questions: [
-      "How are you feeling? Has the headache reduced?",
-      "Have you been taking the BP tablet every day?",
-      "Have you checked your blood pressure at home?"
-    ]
-  → summary_for_whatsapp: "Suresh | Dx: Hypertension stage 1 | Rx: Amlodipine 5mg OD"
-
-Step 7 — PDF generation [pdf_output_node() → pdf_builder.build_soap_pdf()]:
-  ReportLab builds A4 PDF:
-    Header: "ClinicAI  |  Dr. Jameel  |  27 May 2026"
-    Patient bar: "Patient: Suresh  |  Generated: 27 May 2026, 14:32"
-    4 SOAP sections (colour-coded by confidence: green≥75%, amber≥50%, red<50%)
-    FHIR R4 CODED CLINICAL DATA section (Sprint 3):
-      Diagnoses & Symptoms — SNOMED CT table (Clinical Term | Concept ID | FSN)
-      Medications — RxNorm table (Drug Name | RxCUI | Dose / Frequency)
-    Grounding report appendix table
-    Transcript appendix
-    Footer: "Generated by FellowAI Clinical Scribe · DPDP Act 2023 Compliant"
-  pdf_path = "/tmp/tmpSOAP.pdf"
-
-Step 8 — Store PDF + build URL:
-  store_scribe_pdf("/tmp/tmpSOAP.pdf")
-    → document_id = str(uuid4())
-    → copies to generated/scribe_pdfs/{document_id}.pdf
-    → _pdf_store[document_id] = path
-  soap_note_pdf_url = "{PUBLIC_BASE_URL}/scribe/pdf/{document_id}"
-
-Step 9 — Cleanup:
-  os.remove("/tmp/tmpXXXX.ogg")
-
-Output: {
-  soap_note_pdf_url:     "https://...ngrok.../scribe/pdf/abc-123",
-  follow_up_questions:   ["How are you feeling?", ...],
-  missing_sections:      [],
-  summary_for_whatsapp:  "Suresh | Dx: Hypertension stage 1 | Rx: Amlodipine 5mg OD",
-  clinical_entities:     {symptoms: [...], medications: [...], diagnoses: [...]},
-  overall_confidence:    0.86,
-  low_confidence_sections: []
-}
-```
-
-### Detailed flow: After-hours message + morning flush
-
-```
-1. Patient messages at 9:30 PM IST:
-   after_hours_check_node: is_clinic_open()
-     now.hour = 21 >= CLINIC_CLOSE_HOUR(20) → False
-   after_hours_agent_graph.invoke({...})
-     queue_node: queue_after_hours_message(doctor_number, from_number, message)
-       → Redis: clinicai:afterhours:{doctor_number} = [..., {from_number, body, queued_at}]
-       → TTL: 129600s (36h)
-     ack_node: "ClinicAI is closed right now (9 AM – 8 PM IST)..."
-   route_after_hours: reply_message set → END (skips intent_node)
-
-2. Next morning at 9:00 AM IST:
-   _flush_afterhours_job(doctor_number) fires (CronTrigger)
-   get_after_hours_queue(doctor_number) → [patient message dict]
-   clear_after_hours_queue(doctor_number)
-   for item in queued:
-     router_graph.invoke({"from_number": item["from_number"], "incoming_message": item["body"]})
-     → full normal routing → booking flow continues
-```
-
----
-
-## 6. Database & Storage
-
-### Redis key schema
-
-All keys prefixed `clinicai:`. Connection: `REDIS_URL=redis://localhost:6379`. On failure, silently falls back to in-memory Python dicts (process-lifetime only, no cross-restart persistence).
-
-| Key Pattern | Value Type | TTL | Purpose |
+### 3.2 Database Schema
+
+#### Table: `clinics`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String (UUID) | Primary key, auto-generated |
+| `name` | String(255) | Clinic display name |
+| `twilio_number` | String(30) | Unique; routes inbound WhatsApp to correct clinic |
+| `timezone` | String(50) | Default: `Asia/Kolkata` |
+| `open_hour` | Integer | Default: 9; used by AfterHoursAgent |
+| `close_hour` | Integer | Default: 18 |
+| `is_active` | Boolean | Soft-delete flag |
+| `created_at` | DateTime(tz) | Server-side `now()` |
+
+Relationships: `users` (one-to-many ClinicUser), `doctors` (one-to-many Doctor), `model_config` (one-to-one ModelConfig), `patients` (one-to-many Patient).
+
+#### Table: `clinic_users`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String (UUID) | Primary key |
+| `email` | String(255) | Unique, indexed |
+| `hashed_password` | String(255) | bcrypt hash |
+| `full_name` | String(255) | |
+| `role` | String(20) | `admin` or `superadmin` |
+| `clinic_id` | String (FK → clinics.id) | Nullable; superadmins have no clinic |
+| `is_active` | Boolean | |
+| `created_at` | DateTime(tz) | |
+
+Relationships: `clinic` (many-to-one Clinic).
+
+#### Table: `doctors`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String (UUID) | Primary key |
+| `clinic_id` | String (FK → clinics.id) | Indexed |
+| `name` | String(255) | |
+| `specialty` | String(100) | One of 14 supported specialties |
+| `whatsapp_number` | String(30) | E.164 format; used for approval routing |
+| `working_hours_start` | Integer | Hour of day (0-23), default 9 |
+| `working_hours_end` | Integer | Hour of day (0-23), default 18 |
+| `appointment_duration_minutes` | Integer | Default 30 |
+| `buffer_minutes` | Integer | Buffer between appointments, default 5 |
+| `is_active` | Boolean | Soft-delete flag |
+| `created_at` | DateTime(tz) | |
+
+Relationships: `clinic` (many-to-one Clinic). Referenced by `MedicalRecord.doctor_id`.
+
+#### Table: `model_configs`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String (UUID) | Primary key |
+| `clinic_id` | String (FK → clinics.id) | Unique (one config per clinic) |
+| `llm_vendor` | String(20) | `groq`, `anthropic`, `openai`, `google`; default `groq` |
+| `llm_model` | String(100) | Default `llama-3.3-70b-versatile` |
+| `stt_model` | String(100) | Default `whisper-large-v3-turbo` |
+| `groq_api_key_enc` | String(500) | Fernet-encrypted; nullable |
+| `anthropic_api_key_enc` | String(500) | Fernet-encrypted; nullable |
+| `openai_api_key_enc` | String(500) | Fernet-encrypted; nullable |
+| `google_api_key_enc` | String(500) | Fernet-encrypted; nullable |
+| `updated_at` | DateTime(tz) | Auto-updated on every write |
+
+Relationships: `clinic` (many-to-one Clinic). Auto-created at clinic signup with Groq defaults.
+
+#### Table: `patients`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String (UUID) | Primary key |
+| `clinic_id` | String (FK → clinics.id) | Indexed; patient is scoped to one clinic |
+| `phone_number` | String(30) | Indexed; unique per clinic enforced at service layer |
+| `name` | String(255) | Nullable; populated during booking |
+| `age` | Integer | Nullable |
+| `gender` | String(10) | `male`/`female`/`other`; nullable |
+| `blood_group` | String(5) | `A+`, `B-`, `O+`, etc.; nullable |
+| `allergies` | JSON | Array of allergy strings |
+| `chronic_conditions` | JSON | Array of condition strings |
+| `current_medications` | JSON | Array of medication strings |
+| `doctor_notes` | String(2000) | Free-text notes from doctor; nullable |
+| `is_active` | Boolean | Default true |
+| `created_at` | DateTime(tz) | |
+| `last_visit_at` | DateTime(tz) | Nullable; updated on each new MedicalRecord |
+
+Relationships: `clinic` (many-to-one Clinic), `records` (one-to-many MedicalRecord, ordered by `visit_date DESC`).
+
+No database-level unique constraint on `(clinic_id, phone_number)` — enforced via `upsert_patient()` service logic.
+
+#### Table: `medical_records`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String (UUID) | Primary key |
+| `patient_id` | String (FK → patients.id) | Indexed |
+| `clinic_id` | String (FK → clinics.id) | Indexed; denormalized for query efficiency |
+| `doctor_id` | String (FK → doctors.id) | Nullable; indexed |
+| `visit_date` | DateTime(tz) | Indexed; defaults to insert time |
+| `record_type` | String(30) | `consultation`, `lab_report`, `booking` |
+| `chief_complaint` | String(500) | Nullable |
+| `soap_subjective` | Text | Nullable |
+| `soap_objective` | Text | Nullable |
+| `soap_assessment` | Text | Nullable |
+| `soap_plan` | Text | Nullable |
+| `soap_confidence` | Float | LLM self-reported confidence score; nullable |
+| `diagnoses` | JSON | Array of `{name, snomed_code, severity}` |
+| `medications` | JSON | Array of `{name, rxnorm_code, frequency}` |
+| `symptoms` | JSON | Array of `{name, severity, duration}` |
+| `lab_panel_type` | String(30) | `CBC`, `LFT`, `KFT`, `LIPID`, `THYROID`; nullable |
+| `lab_results` | JSON | `{all_values: [...], abnormals: [...], criticals: [...]}` |
+| `fhir_bundle` | JSON | Full FHIR R4 Bundle as JSON object; nullable |
+| `pdf_url` | String(500) | Path/URL to generated PDF; nullable |
+| `created_at` | DateTime(tz) | |
+
+Relationships: `patient` (many-to-one Patient), `doctor` (many-to-one Doctor, nullable).
+
+Retention: No TTL or archival policy implemented yet. All records are permanent.
+
+### 3.3 Redis Key Schema
+
+Redis is used for multi-turn conversation state, booking state machine state, after-hours queues, and session metadata. The following key patterns are in use (TTLs sourced from `store.py` and session management):
+
+| Key Pattern | Content | TTL |
+|---|---|---|
+| `session:{phone_number}` | Current agent state + conversation buffer | 4 hours |
+| `booking:{phone_number}` | BookingAgent sub-state machine (JSON) | 24 hours |
+| `consultation:{phone_number}` | ConsultationSession buffer (messages + roles) | 4 hours |
+| `afterhours:{clinic_id}:{phone_number}` | Queued after-hours messages | Until flush at open hour |
+| `followup:{phone_number}` | Follow-up scheduling metadata | Until follow-up sent |
+| `doctor_alert:{phone_number}:{timestamp}` | Emergency alert dedup key | 1 hour |
+
+LangGraph `MemorySaver` checkpoints for the router graph and sub-agents are stored in-process RAM, not Redis. Booking sub-state survives Redis eviction but is lost on API server restart.
+
+### 3.4 LLM Stack
+
+| Role | Model | Provider | Config |
 |---|---|---|---|
-| `session:{phone}` | JSON (BookingSession) | 86400s (24h) | Per-patient multi-turn booking state |
-| `appt:{id}` | JSON (AppointmentRecord) | None | Confirmed appointments |
-| `appts_by_phone:{phone}` | Redis SET of appt IDs | None | Reverse index for patient→appointments |
-| `approval:{id}` | JSON dict | None | Pending doctor appointment approvals |
-| `approvals_waiting:{doctor}` | Redis SET of approval IDs | None | Index for doctor's pending approvals |
-| `doctor_profile:{phone}` | JSON dict | None | Doctor onboarding profile |
-| `doctor_setup:{phone}` | JSON dict | 3600s (1h) | In-progress doctor setup session |
-| `greeted:{phone}` | `"1"` | 2592000s (30d) | Greeting suppression flag |
-| `slot_suggestions:{phone}` | JSON list | 86400s (24h) | Calendar slot suggestion cache |
-| `soap:{id}` | JSON dict | 604800s (7d) | Pending SOAP note approvals |
-| `lab:{id}` | JSON dict | 604800s (7d) | Pending lab review notifications |
-| `last_active:{phone}` | ISO timestamp string | 604800s (7d) | No-show check: last patient activity |
-| `consult:{phone}` | JSON (ConsultationSession) | 14400s (4h) | Active consultation session buffer |
-| `afterhours:{doctor}` | JSON list of message dicts | 129600s (36h) | After-hours message queue |
+| Primary LLM | `llama-3.3-70b-versatile` | Groq | `GROQ_API_KEY` env var |
+| Fallback LLM | `gemini-2.5-flash` | Google Gemini | `GEMINI_API_KEY` env var |
+| STT (transcription) | `whisper-large-v3` / `whisper-large-v3-turbo` | Groq | `WHISPER_MODEL` env var |
+| Per-clinic override | Any supported model | Any supported vendor | `model_configs` table |
 
-### In-memory fallback stores (when Redis unavailable)
+`llm_factory.py` resolves the correct LLM client at runtime:
+1. Load `ModelConfig` for the clinic via `resolve_model_config_for_clinic()`.
+2. If a clinic-specific encrypted API key is present for the configured vendor, decrypt with Fernet and use it.
+3. Fall back to global env-var key if no clinic key is configured.
+4. If no `ModelConfig` row exists, use global env-var defaults.
 
-```python
-_sessions: dict[str, BookingSession]
-_appointments: dict[str, AppointmentRecord]
-_pending_approvals: dict[str, dict]
-_greeted_numbers: set[str]
-_doctor_profiles: dict[str, dict]
-_doctor_setup_sessions: dict[str, dict]
-_slot_suggestions: dict[str, list[dict]]
-_pending_soaps: dict[str, dict]
-_pending_lab_reviews: dict[str, dict]
-_consultations: dict[str, ConsultationSession]    # Sprint 2
-_after_hours_queues: dict[str, list[dict]]        # Sprint 2
-```
-
-All in-memory stores are process-lifetime only. A server restart loses all state.
-
-### LangGraph MemorySaver
-
-`router_graph` uses `MemorySaver()` as its checkpointer. This stores LangGraph thread state in-process memory (not Redis). Thread ID = patient phone number. This is separate from Redis sessions — the MemorySaver holds LangGraph's internal graph checkpoint, while Redis holds the application-level `BookingSession` data.
+Supported vendors in `model_configs.llm_vendor`: `groq`, `anthropic`, `openai`, `google`. LangChain integration packages are conditionally imported; `langchain-anthropic` and `langchain-openai` are listed as optional in `requirements.txt`.
 
 ---
 
-## 7. Infrastructure & Deployment
+## 4. WhatsApp Flows
 
-### Local development
+### 4.1 Appointment Booking (10-State Machine)
 
-```
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Or directly: `python main.py` which calls `uvicorn.run("main:app", ...)`.
-
-**External tunnel:** ngrok required for Twilio webhook callbacks. `PUBLIC_BASE_URL` in `.env` is the current ngrok URL. Must be updated on every ngrok session restart.
-
-**Redis:** `docker run -p 6379:6379 redis` or local Redis service. If unavailable, falls back to in-memory (no restart persistence).
-
-**Dependencies (inferred from imports):**
-- `fastapi`, `uvicorn`
-- `langchain-core`, `langchain-groq`, `langchain-google-genai`, `langgraph`
-- `pydantic` (v2)
-- `redis`
-- `apscheduler`
-- `httpx`
-- `twilio`
-- `python-dotenv`
-- `groq` (for Whisper API)
-- `reportlab`
-- `pdfplumber`
-- `zoneinfo` (Python 3.9+ stdlib)
-
-### Environment configuration
-
-All configuration via `.env` file. Key variables:
-
-```ini
-# LLM
-GROQ_API_KEY=...                    # Groq Cloud API key
-GEMINI_API_KEY=...                  # Google Generative AI key (fallback LLM)
-GROQ_MODEL=llama-3.3-70b-versatile  # Primary classifier model
-GEMINI_MODEL=gemini-2.5-flash       # Fallback model
-WHISPER_MODEL=whisper-large-v3      # Voice transcription model
-
-# Twilio
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
-SOAP_APPROVAL_CONTENT_SID=HX...    # Twilio Content Template SID (SOAP approval buttons)
-APPOINTMENT_APPROVAL_CONTENT_SID=HX...  # Twilio Content Template SID (appt approval buttons)
-
-# Doctor configuration
-DOCTOR_WHATSAPP_NUMBERS=Dr Jameel:+919801581020   # Comma-separated "Name:number" pairs
-
-# Clinic settings
-CLINIC_NAME=ClinicAI
-CLINIC_OPEN_HOUR=9                  # After-hours window start (IST)
-CLINIC_CLOSE_HOUR=20                # After-hours window end (IST)
-REMINDER_MINUTES_BEFORE=2           # Demo: 2 min; Prod: 120 min
-CONSULTATION_TIMEOUT_MINUTES=2      # Demo: 2 min; Prod: 30 min
-WEEKLY_INSIGHTS_HOUR=8              # Hour IST to deliver Monday practice report (0–23)
-
-# Integration
-JAMEEL_SCRIBE_URL=                  # Empty = stub mode; set when Jameel API is live
-REDIS_URL=redis://localhost:6379
-PUBLIC_BASE_URL=https://...ngrok-free.app  # For PDF public URLs in WhatsApp
-
-# Google Calendar (optional)
-GOOGLE_CALENDAR_ENABLED=False
-GOOGLE_CALENDAR_CREDENTIALS_FILE=google_credentials.json
-GOOGLE_CALENDAR_TOKEN_FILE=google_token.json
-GOOGLE_CALENDAR_ID=primary
-GOOGLE_CALENDAR_TIMEZONE=Asia/Kolkata
-APPOINTMENT_DURATION_MINUTES=30
-```
-
-### No Docker, no CI/CD
-
-Current deployment is fully local development. No Dockerfile, no docker-compose, no CI pipeline exists in the repository. Manual startup + ngrok for external access.
-
----
-
-## 8. Features Implemented So Far
-
-### Sprint 1
-
-**Intent classification (10 intents):**
-- `appointment_book` — multi-turn booking with entity extraction
-- `appointment_cancel` — cancel by appointment ID or latest
-- `appointment_reschedule` — collect new date/time, re-submit for approval
-- `appointment_status` — show current booking status
-- `followup_query` — post-visit follow-up handling
-- `lab_report_share` — lab PDF processing trigger
-- `prescription_request` — prescription handling
-- `general_query` — off-topic catch-all with graceful response
-- `emergency` — emergency alert to patient + doctor
-- `consultation_message` — Sprint 2 consultation session trigger
-
-**Multi-turn booking flow:**
-- GREETING → COLLECTING_INFO → COLLECT_DATE_TIME → CONFIRM_SLOT → WAITING_DOCTOR_APPROVAL → BOOKED state machine
-- Context-aware classification using `last_bot_response`
-- Hinglish date/time understanding (today/aaj, tomorrow/kal, parso, explicit month+day)
-
-**Doctor approval workflow:**
-- Twilio Content Templates (interactive buttons) for approve/reject
-- Text-based `YES APT{id}` / `NO APT{id}` fallback
-- `APT{5-char-uuid}` approval IDs
-- Google Calendar slot availability check (when enabled)
-
-**Appointment reminder:**
-- APScheduler DateTrigger at `appointment_time - REMINDER_MINUTES_BEFORE`
-- Dynamic time label: "2 minutes" / "2 hours" based on `REMINDER_MINUTES_BEFORE` value
-- Early appointment safeguard: if < `REMINDER_MINUTES_BEFORE` away, fires in 30 seconds
-
-**No-show recovery:**
-- Two-attempt system: +1hr and +24hr after appointment time
-- Activity check: skips recovery if patient was active after appointment time (`last_active` Redis key)
-
-**Clinical scribe (SOAP notes):**
-- Doctor sends voice note → Whisper transcription → LLaMA SOAP generation → ReportLab PDF
-- Doctor approval buttons (Twilio Content Template) before sending to patient
-- `APPROVE RX{id}` / `REJECT RX{id}` text commands
-- PDF served at `/scribe/pdf/{id}` via FileResponse
-
-**Lab report parsing:**
-- Patient sends PDF → pdfplumber extraction → Groq LLM summary → patient receives summary
-- Doctor notification with `OK LAB{id}` acknowledgement command
-- PDF served at `/lab-report/pdf/{id}`
-
-**Doctor onboarding:**
-- 5-step setup: name, google email, working hours, appointment duration, buffer
-- `doctor_profile` stored in Redis
-
-### Sprint 2
-
-**Multi-agent architecture:**
-- RouterAgent as top-level orchestrator (8 nodes)
-- 6 specialist sub-agents dispatched via intent + journey_state routing
-- All Sprint 1 booking flows preserved through BookingAgent
-
-**ConsultationAgent:**
-- Creates ConsultationSession in Redis with 4h TTL
-- Buffers all patient messages as `ConsultationMessage(sender_role="patient")`
-- Doctor voice notes buffered as `ConsultationMessage(sender_role="doctor")` via `_try_buffer_doctor_audio()`
-- Inactivity timeout via APScheduler (configurable, default 30 min)
-- Closing phrase detection (14 Hindi/English phrases)
-- Two termination paths: closing phrase → immediate finalize; timeout job → finalize
-- `finalize_and_send()` builds consultation bundle → calls `scribe_service.process_consultation_bundle()` (local) or external `JAMEEL_SCRIBE_URL` (when set)
-- Doctor receives consultation summary + PDF link via WhatsApp within 60s of close
-- `journey_state` transitions: NEW_PATIENT → CONSULTATION_ACTIVE → POST_CONSULT
-
-**Jameel integration contract:**
-```json
-{
-  "patient_id": "+919876543210",
-  "doctor_id": "+919801581020",
-  "messages": [
-    {"sender_role": "patient", "text": "sir dard ho raha", "audio_url": null, "timestamp": "..."},
-    {"sender_role": "doctor", "text": null, "audio_url": "https://api.twilio.com/...", "timestamp": "..."}
-  ],
-  "audio_files": [{"url": "https://...", "duration_secs": null}]
-}
-```
-
-**AfterHoursAgent:**
-- `is_clinic_open()` check at router entry
-- Message queued to Redis list with 36h TTL
-- Morning flush via `CronTrigger(hour=CLINIC_OPEN_HOUR, minute=0)`
-- Re-injects queued messages into router_graph on open
-
-**EmergencyAgent:**
-- "Call 112" response to patient
-- Emergency alert to all configured doctor numbers
-
-**FollowUpAgent:**
-- POST_CONSULT context-aware responses
-- Prescription request handling
-
-**LabAgent:**
-- Lab report intent with no PDF attached → prompts for PDF
-
-**Jameel Scribe Pipeline (`scribe_service.py`):**
-- Accepts `consultation_bundle` (patient_id, doctor_id, messages, audio_files)
-- Downloads all doctor audio files from Twilio media URLs (basic auth)
-- Transcribes each file via Groq Whisper (`asyncio.to_thread` — non-blocking)
-- Builds combined consultation transcript with `PATIENT:` / `DOCTOR:` role labels
-- Runs `soap_generator_node` → `extract_entities_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node` (same nodes as single-voice-note scribe, called as plain functions)
-- Computes overall confidence + low-confidence section names via `nodes.py` helpers
-- Stores PDF in `generated/scribe_pdfs/`, returns public URL at `/scribe/pdf/{id}`
-- Returns full integration contract response: `{soap_note_pdf_url, follow_up_questions, missing_sections, summary_for_whatsapp, clinical_entities, overall_confidence, low_confidence_sections}`
-
-**Clinical entity extractor (`extract_entities_node`):**
-- New LangGraph node inserted between `soap_generator_node` and `grounding_check_node` in both the single-voice-note scribe pipeline and the consultation bundle pipeline
-- System prompt (`ENTITY_EXTRACT_SYSTEM`) includes explicit SECURITY GUARDRAIL to ignore any injection attempts in the transcript
-- Input: full transcript + soap_note context (so entity linking uses clinical reasoning, not only surface text)
-- Output schema: `{"symptoms": [{"name", "severity", "duration"}], "medications": [{"name", "dose", "frequency"}], "diagnoses": [str]}`
-- Stored as `clinical_entities` in `ScribeState` and returned in the scribe API response
-- Hinglish mappings: sir dard→headache, bukhar→fever, dawa→medicine (hardened in system prompt)
-
-**SOAP confidence hardening:**
-- `overall_soap_confidence(soap_note)` — computes mean confidence across all non-missing sections; exported from `nodes.py`
-- `low_confidence_section_names(soap_note)` — returns `["Assessment"]` style list for sections below 0.6; exported from `nodes.py`
-- Threshold: 0.6 (overall mean). Applied in two places:
-  1. `clinical_scribe.py` — single voice note flow: warning appended to the PDF caption/approval text sent to doctor
-  2. `consultation_service.py` — consultation finalization: warning appended to the doctor WhatsApp summary
-- Warning format: `⚠️ Low confidence warning: I am not confident about the [Section] section(s). Please review carefully before sending.`
-- No action taken automatically — the doctor is informed and must decide whether to approve or request more information
-
-**Weekly practice insights:**
-- `_weekly_insights_job(doctor_number)` fires every Monday at `WEEKLY_INSIGHTS_HOUR` IST via APScheduler `CronTrigger(day_of_week="mon")`
-- Aggregates all appointments for the doctor confirmed in the past 7 days
-- Metrics: total, past count, upcoming count, estimated no-shows (heuristic: slot passed + `reminder_sent=True` + no `last_active` activity on/after appointment time), day_counts (Mon–Sun), time slots (Morning/Afternoon/Evening), symptom frequency from `symptoms_mentioned`
-- Sends formatted WhatsApp message to doctor: total, past/upcoming split, no-show rate, busiest day, busiest slot, top 3 complaints
-- Registered at startup: `main.py` lifespan calls `schedule_weekly_insights(doc_num)` for every configured doctor number
-- Controlled by `WEEKLY_INSIGHTS_HOUR` env var (default: 8); override to adjust delivery time
-
-**Scribe API endpoint (`scribe_router.py`):**
-- `POST /scribe/consult` — HTTP interface for the scribe pipeline
-- Accepts `ConsultationBundleRequest`, returns `ScribeResult`
-- Deployment path: when services split to separate servers, set `JAMEEL_SCRIBE_URL` → this endpoint. No other code changes needed.
-
-**Debug API:**
-- `GET /debug/consultations` → all active ConsultationSession objects
-- All existing Sprint 1 debug endpoints preserved
-
-### Sprint 3
-
-**SNOMED CT + HL7 FHIR R4 Validation Pipeline:**
-
-*Design principle*: The LLM extracts entity *names*. The terminology service assigns *codes*. These responsibilities are strictly separated; the LLM must never be the authoritative source of medical terminology codes.
-
-**`fhir_coding_node` (new LangGraph node, `app/graph/scribe/nodes.py`):**
-- Inserted between `extract_entities_node` and `grounding_check_node` in the 7-node scribe pipeline
-- Inputs: `clinical_entities` from state (symptoms, medications, diagnoses)
-- For every diagnosis and symptom: calls `terminology.lookup_snomed(term)` → SNOMED CT concept ID + FSN
-- For every medication: calls `terminology.lookup_rxnorm(drug_name)` → RxNorm RxCUI + display name
-- Builds FHIR R4 Condition resources (one per diagnosis/symptom) and MedicationRequest resources (one per medication) programmatically in Python — no LLM call
-- Assembles a `Bundle` (type: `collection`) containing all resources
-- Injects Python-generated UUIDs for all resource IDs
-- Stamps `recordedDate` / `authoredOn` with current date
-- Calls `_validate_fhir_bundle()` — structural field-presence check (Condition: code.coding, clinicalStatus, subject; MedicationRequest: medicationCodeableConcept.coding, status, intent, subject)
-- **Non-blocking**: all errors go to `fhir_validation_errors`, never to `errors`. Pipeline completes even if all codes are `UNKNOWN`
-- `_FREQUENCY_MAP` maps `OD/BD/TDS/SOS` and long-form variants to FHIR GTSAbbreviation codes (`QD/BID/TID/PRN`)
-- `_parse_dose("5mg")` → `(5.0, "mg")` for FHIR `doseQuantity`
-
-**Terminology lookup service (`app/services/terminology.py`):**
-- `lookup_snomed(term, timeout=4.0)` — three-step lookup:
-  1. Local `data/terminology/snomed.json` — 100+ pre-normalised terms, multiple aliases per concept, includes Hinglish transliterations (e.g. `sar dard`, `kamar dard`, `loose motions`)
-  2. NLM Clinical Tables API: `GET https://clinicaltables.nlm.nih.gov/api/snomed_ct/v3/search?terms={term}&df=code,consumer_name&maxList=1`
-  3. `UNKNOWN` sentinel with the original term as `fsn`
-- `lookup_rxnorm(drug_name, timeout=4.0)` — three-step lookup:
-  1. Local `data/terminology/rxnorm.json` — 80+ entries including Indian brand names (Crocin, Dolo, Azee, Cifran, Voveran, Glycomet, Thyronorm, etc.)
-  2. NLM RxNorm API: `GET https://rxnav.nlm.nih.gov/REST/rxcui.json?name={drug}&search=1` then `/rxcui/{id}/properties.json` for display name
-  3. `UNKNOWN` sentinel
-- In-memory session cache (`_snomed_cache`, `_rxnorm_cache`) avoids redundant API calls for repeated terms within a pipeline run
-- `_normalize(term)` strips Hinglish parenthetical suffixes (e.g. `"fever (bukhar)"` → `"fever"`), lowercases, and collapses whitespace — applied both when building the table index and when querying
-- `clear_caches()` for test isolation
-
-**Terminology data files:**
-- `data/terminology/snomed.json` — sourced from SNOMED CT International Edition (browser.ihtsdotools.org). Covers disorders and findings for: hypertension, diabetes (T1/T2/general), fever, headache/migraine, cough (dry/productive), URI, asthma/COPD, anemia, hypothyroidism/hyperthyroidism, GERD/gastritis/peptic ulcer, dengue, typhoid, malaria, UTI, allergic rhinitis, eczema, hyperlipidemia, constipation, depression, anxiety, insomnia, vitamin deficiencies, osteoporosis/osteoarthritis/gout/rheumatoid arthritis, CKD, obesity, chest pain, breathlessness, dizziness/vertigo, back pain, joint/knee/shoulder/neck pain, abdominal pain, nausea/vomiting, diarrhea, fatigue, weight change, sore throat, runny nose, skin rash/itching, edema, palpitations, loss of appetite, dyspepsia, otalgia, myalgia, dysuria, urinary frequency
-- `data/terminology/rxnorm.json` — sourced from NLM RxNorm (ingredient-level RxCUIs). Covers: amlodipine/norvasc, metformin/glycomet, paracetamol/crocin/dolo, omeprazole, atorvastatin/atorva, azithromycin/azee, amoxicillin, amoxicillin-clavulanate/augmentin, pantoprazole/pantocid, cetirizine/cetzine, ibuprofen/brufen, aspirin/ecosprin, losartan, lisinopril, glimepiride, levothyroxine/thyronorm/eltroxin, metronidazole/metrogyl, ciprofloxacin/cifran, doxycycline, prednisolone/wysolone, montelukast/montair, salbutamol/ventolin, clonazepam, metoprolol, enalapril, simvastatin, rosuvastatin/rozat, sertraline/serta, diclofenac/voveran, cefixime/taxim, fluconazole, ranitidine, famotidine, rabeprazole, esomeprazole/nexium, folic acid, iron/ferrous sulfate, calcium carbonate, vitamin D/cholecalciferol, vitamin B12/methylcobalamin, atenolol, alprazolam, clopidogrel/plavix, glibenclamide
-
-**PDF FHIR section (`app/graph/scribe/pdf_builder.py`):**
-- `build_soap_pdf()` accepts two new optional parameters: `snomed_mappings: list | None` and `fhir_bundle: dict | None` (default `None` — backward compatible)
-- Renders "FHIR R4 CODED CLINICAL DATA" section between SOAP sections and the ungrounded flags summary (only if at least one mapping or resource is present)
-- Conditions table: Clinical Term | SNOMED CT ID | Fully Specified Name
-- Medications table: Drug Name | RxCUI | Dose / Frequency
-- Table styling matches existing grounding report (BRAND_BLUE header, LIGHT_BLUE alternating rows)
-
-**Doctor approval flow (Sprint 3 additions):**
-- Text-fallback approval message now prepends a SNOMED CT + RxNorm summary block (capped at 4 items each)
-- `REGEN {soap_id}` or `REGEN {soap_id} {feedback}` command (handled in `soap_approval._regen()`):
-  - Loads stored `transcript` from the pending SOAP Redis record
-  - If feedback provided: prepends `[DOCTOR CORRECTION: {feedback}]` to the transcript
-  - Re-runs: `soap_generator_node` → `extract_entities_node` → `fhir_coding_node` → `grounding_check_node` → `followup_generator_node` → `pdf_output_node`
-  - Overwrites the stored PDF at `generated/scribe_pdfs/{document_id}.pdf` — same URL stays valid
-  - Updates Redis record with fresh `fhir_bundle`, `snomed_mappings`, `clinical_entities`, `follow_up_questions`; retains original `transcript` so subsequent REGENs correct against the true source
-  - Sends regenerated PDF to doctor with same APPROVE/REJECT/REGEN options
-
----
-
-## 9. Sequence Diagram (Text Format)
-
-### End-to-end appointment + consultation
+The BookingAgent manages a finite state machine with the following states:
 
 ```
-Patient        Twilio        webhook_router      RouterAgent      BookingAgent     APScheduler      Doctor
-   |              |                |                  |                |                |              |
-   |---"I want appointment"------> |                  |                |                |              |
-   |              |                |--router_graph.invoke()---------> |                |              |
-   |              |                |                  |--intent_node--|                |              |
-   |              |                |                  |    (Groq LLM) |                |              |
-   |              |                |                  |--session_node-|                |              |
-   |              |                |                  |--booking_dispatch_node-------> |              |
-   |              |                |                  |                |--flow_node--> |              |
-   |              |                |                  |                |   (GREETING→COLLECTING)      |
-   | <--"What's your name?"------- |                  |                |                |              |
-   |              |                |                  |                |                |              |
-   [multiple turns: name, date, time, doctor]
-   |              |                |                  |                |                |              |
-   | <--"Confirm: Dr Jameel, tomorrow 10am"---------- |                |                |              |
-   |---"Yes confirm"-------------> |                  |                |                |              |
-   |              |                |--router_graph--> |--booking-----> |--confirm_node  |              |
-   |              |                |                  |                |--request_doctor_approval()    |
-   |              |                |                  |                |                |----APT001--> |
-   | <--"Waiting for approval"---- |                  |                |                |              |
-   |              |                |                  |                |                |              |
-   |              |                |                  |                |    Doctor taps "Approve"      |
-   |              |                | <--ButtonPayload=apt_approve:APT001------------------------------ |
-   |              |                |--handle_doctor_message()          |                |              |
-   |              |                |   appointment_approval._approve() |                |              |
-   |              |                |   schedule_reminder(+2min)------> |                |              |
-   |              |                |   schedule_no_show_check()------> |                |              |
-   | <--"Appointment confirmed"--- |                  |                |                |              |
-   |              |                |                  |                |                |              |
-   [2 minutes later]
-   |              |                |                  |                |--_send_reminder_job()         |
-   | <--"Reminder: Dr Jameel in 2 minutes"----------- |                |                |              |
-   |              |                |                  |                |                |              |
-   [During appointment — patient sends message]
-   |---"mujhe sir dard hai"------> |                  |                |                |              |
-   |              |                |--router_graph--> |--intent:consultation_message    |              |
-   |              |                |                  |--consultation_dispatch_node      |              |
-   |              |                |                  |   start_or_resume_node           |              |
-   |              |                |                  |   ConsultationSession created    |              |
-   |              |                |                  |   schedule_consultation_timeout()|              |
-   | <--"Message received — consultation in progress" |                |                |              |
-   |              |                |                  |                |                |              |
-   [Doctor sends voice note]
-   |              |                | <--audio/ogg---------------------------------------------------------|
-   |              |                |--handle_doctor_voice_note()       |                |              |
-   |              |                |   _try_buffer_doctor_audio()      |                |              |
-   |              |                |   finds active ConsultationSession|                |              |
-   |              |                |   buffers audio_url               |                |              |
-   | (no message to patient — audio silently buffered)                 |                |              |
-   |              |                |    <---"🎙️ Voice note received..."----------------------->       |
-   |              |                |                  |                |                |              |
-   [Patient sends "ok done"]
-   |---"ok done"-----------------> |                  |                |                |              |
-   |              |                |--router_graph--> |--consultation_dispatch          |              |
-   |              |                |                  |   detect_end: closing phrase    |              |
-   |              |                |                  |   session.is_active = False     |              |
-   |              |                |                  |   cancel_consultation_timeout() |              |
-   |              |                |                  |   finalize_node                 |              |
-   |              |                |                  |   finalize_and_send()           |              |
-   |              |                |                  |   build_consultation_bundle()   |              |
-   |              |                |                  |   _call_jameel()                |              |
-   |              |                |                  |     scribe_service              |              |
-   |              |                |                  |       download audio            |              |
-   |              |                |                  |       Whisper transcribe        |              |
-   |              |                |                  |       SOAP generation (LLaMA)   |              |
-   |              |                |                  |       grounding check           |              |
-   |              |                |                  |       follow-up questions       |              |
-   |              |                |                  |       PDF (ReportLab)           |              |
-   |              |                |                  |    <---{pdf_url, follow_ups, summary}-------->|
-   |              |                |                  |   journey_state=POST_CONSULT    |              |
-   |              |                |                  |   delete_consultation()         |              |
-   | <--"Consultation recorded. Doctor will send prescriptions shortly."               |              |
+GREETING
+  ↓ (patient message)
+COLLECTING_INFO          ← Gathers name, phone, reason for visit
+  ↓
+COLLECT_DATE_TIME        ← Parses preferred appointment date/time (NLP)
+  ↓
+COLLECT_DOCTOR_PREFERENCE ← Optional specialty/doctor name preference
+  ↓
+CONFIRM_SLOT             ← Shows proposed slot to patient for confirmation
+  ↓
+WAITING_DOCTOR_APPROVAL  ← Sends Twilio interactive button message to doctor
+  ↓
+  ├── Doctor approves → BOOKED (confirmation to patient + calendar event)
+  ├── Doctor rejects → notifies patient, returns to COLLECT_DATE_TIME
+  └── Doctor suggests time → RESCHEDULE_INIT → RESCHEDULE_CONFIRM → BOOKED
+
+Side states:
+  CANCEL_CONFIRM         ← Patient asks to cancel; requires confirmation
+```
+
+**Doctor approval message** — Sent via Twilio Content Template (`SOAP_APPROVAL_CONTENT_SID`). Contains: patient name, phone, requested time, doctor name. Interactive buttons: `Approve`, `Reject`, `Suggest Time`.
+
+**Reminder logic** — APScheduler fires a reminder job `REMINDER_MINUTES_BEFORE` (default 120) minutes before the appointment time. A separate no-show job fires 30 minutes after the appointment start if no consultation session has begun.
+
+**Google Calendar** — Controlled by `GOOGLE_CALENDAR_ENABLED=False` (disabled by default). When enabled, creates a calendar event using service account credentials in `google_credentials.json`.
+
+### 4.2 Consultation Flow
+
+The ConsultationAgent handles real-time AI-mediated doctor-patient conversations.
+
+**Session lifecycle:**
+1. Patient message classified as `consultation` intent by RouterAgent.
+2. `ConsultationSession` created in Redis with `session_id`, `patient_phone`, `doctor_phone`, `clinic_id`, `start_time`. TTL: 4 hours.
+3. All subsequent messages from both patient and doctor are appended to the session buffer with `sender_role` tagging (`patient` or `doctor`).
+4. AI responds to patient messages in the context of the accumulated conversation.
+5. **Closing triggers:** 14-phrase vocabulary (English/Hindi, e.g., "that's all", "bas kar", "theek hai") OR 30-minute inactivity timeout (`CONSULTATION_TIMEOUT_MINUTES=2` in demo config, 30 in production).
+6. On close: `scribe_service` pipeline is invoked.
+
+**Doctor-initiated close** — Not yet implemented. Only patient-side close triggers the scribe pipeline (see Known Limitations §9.3).
+
+### 4.3 Clinical Scribe Pipeline
+
+Invoked after ConsultationAgent session close or when a doctor uploads a standalone voice note.
+
+```
+Input: audio (OGG) or consultation transcript buffer
+  ↓
+transcribe_audio_node
+  → Groq Whisper STT → raw transcript text
+  ↓
+soap_generator_node
+  → LLM prompt (transcript + system context) → structured SOAP note
+  → Sections: Subjective, Objective, Assessment, Plan + confidence score
+  ↓
+extract_entities_node
+  → LLM structured extraction → diagnoses[], medications[], symptoms[]
+  → Each entity: name + severity/frequency/duration (no codes yet)
+  ↓
+fhir_coding_node
+  → terminology.py three-tier lookup for each entity:
+      1. Local curated JSON tables
+      2. NLM UMLS / RxNav public API
+      3. UNKNOWN sentinel
+  → SNOMED CT codes → diagnoses + symptoms
+  → RxNorm RxCUIs → medications
+  → Builds FHIR R4 Bundle (Condition + MedicationRequest resources)
+  ↓
+grounding_check_node
+  → Validates SOAP consistency; flags potential hallucinations
+  ↓
+followup_generator_node
+  → Generates follow-up instructions and schedules FollowUpAgent job
+  → Default delay: FOLLOWUP_DEFAULT_DAYS (2 days) or DEMO_FOLLOWUP_DELAY_MINUTES (3)
+  ↓
+pdf_output_node
+  → ReportLab generates PDF with SOAP + codes + FHIR summary
+  → Saved to ./generated/ volume
+  → PDF sent to doctor via WhatsApp
+  → SOAP + entity + FHIR data written to PostgreSQL MedicalRecord
+```
+
+**REGEN command:** Doctor sends `REGEN <optional feedback>` via WhatsApp. The pipeline re-runs from `soap_generator_node` using the stored audio transcript plus the feedback as correction context. Audio is not re-transcribed. A new MedicalRecord row is written; the old one is retained.
+
+### 4.4 Lab Report Flow
+
+Triggered when a patient or doctor sends a PDF or image to the lab report intent handler.
+
+```
+Input: PDF or image media attachment (MediaUrl0 from Twilio)
+  ↓
+Download media with Twilio auth headers
+  ↓
+Text extraction:
+  → pdfplumber (PDF text extraction, primary)
+  → pytesseract OCR (image or scanned PDF fallback)
+  ↓
+Panel detection
+  → Regex + keyword matching → CBC | LFT | KFT | LIPID | THYROID
+  ↓
+LLM structured extraction
+  → Per-panel prompt → {test_name, value, unit, reference_range, status}[]
+  ↓
+Abnormal/critical flagging
+  → Compare value vs reference_range → normal | abnormal | critical
+  ↓
+SNOMED coding for test names and conditions
+  ↓
+MedicalRecord written to PostgreSQL
+  → record_type = "lab_report"
+  → lab_panel_type, lab_results JSON
+  ↓
+Summary WhatsApp message to doctor
+  → Abnormals highlighted, criticals flagged with urgency language
 ```
 
 ---
 
-## 10. API Documentation
+## 5. Medical History System
 
-### Health
-
-**`GET /`**
-- Returns: `{status, service, version, features: {classifier, whatsapp_webhook, booking_graph, scheduler}, endpoints: {...}}`
-- Purpose: Feature flag check, endpoint discovery
-
-**`GET /graph/nodes`**
-- Returns: `{nodes, classifier_graph, booking_graph, description}`
-- Purpose: Debug — shows compiled graph nodes
-
-### WhatsApp
-
-**`POST /webhook/twilio`** (Form parameters)
-- Params: `From`, `Body`, `NumMedia`, `MediaUrl0`, `MediaContentType0`, `ButtonPayload`
-- Returns: TwiML `<Response/>` (always 200 to Twilio)
-- Purpose: Main Twilio webhook — all WhatsApp message handling
-
-**`GET /webhook/twilio`**
-- Returns: `{status: "ok", message: "..."}`
-- Purpose: Twilio webhook health check
-
-### Classification (direct HTTP)
-
-**`POST /classify`**
-- Body: `{"from_number": "+91...", "message": "..."}`
-- Returns: `ClassifyResponse {intent, confidence, entities, bot_response, is_multi_intent, all_intents, raw_message, flagged_as_injection, pipeline_trace}`
-- Purpose: Test classifier without WhatsApp
-
-### Clinical Scribe API (Jameel-side)
-
-**`POST /scribe/consult`**
-- Body:
-  ```json
-  {
-    "patient_id": "+919876543210",
-    "doctor_id": "+919801581020",
-    "messages": [
-      {"sender_role": "patient", "text": "...", "audio_url": null, "timestamp": "..."},
-      {"sender_role": "doctor",  "text": null,  "audio_url": "https://...", "timestamp": "..."}
-    ],
-    "audio_files": [{"url": "https://...", "duration_secs": null}]
-  }
-  ```
-- Returns:
-  ```json
-  {
-    "soap_note_pdf_url": "https://.../scribe/pdf/{id}",
-    "follow_up_questions": ["How are you feeling?", "Are you taking the medicine?"],
-    "missing_sections": [],
-    "summary_for_whatsapp": "Suresh | Dx: Hypertension | Rx: Amlodipine 5mg OD",
-    "clinical_entities": {
-      "symptoms":    [{"name": "headache", "severity": "mild", "duration": "2 days"}],
-      "medications": [{"name": "Amlodipine", "dose": "5mg", "frequency": "once daily"}],
-      "diagnoses":   ["Hypertension stage 1"]
-    },
-    "overall_confidence": 0.86,
-    "low_confidence_sections": [],
-    "snomed_mappings": [
-      {"clinical_term": "Hypertension stage 1", "snomed_concept_id": "38341003",
-       "snomed_fsn": "Hypertensive disorder (disorder)", "fhir_resource_type": "Condition", "source": "nlm_api"},
-      {"clinical_term": "headache", "snomed_concept_id": "25064002",
-       "snomed_fsn": "Headache (finding)", "fhir_resource_type": "Condition", "source": "local"}
-    ],
-    "fhir_bundle": {
-      "resourceType": "Bundle", "id": "<uuid>", "type": "collection", "timestamp": "...",
-      "entry": [
-        {"resource": {"resourceType": "Condition", "id": "<uuid>",
-          "code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder (disorder)"}]},
-          "clinicalStatus": {"coding": [{"code": "active"}]},
-          "verificationStatus": {"coding": [{"code": "unconfirmed"}]},
-          "subject": {"reference": "Patient/unknown"}, "recordedDate": "2026-05-29"}},
-        {"resource": {"resourceType": "MedicationRequest", "id": "<uuid>",
-          "status": "active", "intent": "order",
-          "medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "17767", "display": "amlodipine"}], "text": "Amlodipine"},
-          "dosageInstruction": [{"text": "5mg once daily", "timing": {"code": {"coding": [{"code": "QD"}]}}, "doseAndRate": [{"doseQuantity": {"value": 5.0, "unit": "mg"}}]}],
-          "subject": {"reference": "Patient/unknown"}, "authoredOn": "2026-05-29"}}
-      ]
-    },
-    "fhir_validation_errors": []
-  }
-  ```
-- Purpose: Full consultation-to-SOAP pipeline. Downloads + transcribes audio, generates SOAP note with SNOMED CT + FHIR R4 coding, returns PDF URL.
-- Called by: `consultation_service._call_jameel()` — directly (in-process) when `JAMEEL_SCRIBE_URL` is empty, or via HTTP when URL is set.
-
-### PDF downloads
-
-**`GET /scribe/pdf/{document_id}`**
-- Returns: PDF file (FileResponse)
-- Status 404 if not found
-- Purpose: Public URL for SOAP PDF (served to Twilio for doctor WhatsApp delivery)
-
-**`GET /lab-report/pdf/{document_id}`**
-- Returns: PDF file (FileResponse)
-- Status 404 if not found
-- Purpose: Lab report PDF download
-
-### Debug endpoints
-
-**`GET /debug/sessions`** — All active `BookingSession` objects from Redis
-**`GET /debug/appointments`** — All `AppointmentRecord` objects
-**`GET /debug/identity`** — Configured doctor phone numbers
-**`GET /debug/pending-approvals`** — All pending appointment approval records
-**`GET /debug/doctors`** — All saved doctor profiles
-**`GET /debug/consultations`** — All active/recent `ConsultationSession` objects (Sprint 2)
-
----
-
-## 11. Dependency Graph
+### 5.1 Patient Lifecycle
 
 ```
-main.py
-├── app.api.classifier_router
-│   └── app.graph.classifier
-│       ├── app.schemas (ClassifierState, ClassifyRequest, ClassifyResponse)
-│       └── app.prompts (CLASSIFIER_SYSTEM_PROMPT, CLASSIFIER_FEW_SHOT)
-│
-├── app.api.webhook_router
-│   ├── app.graph.router (router_graph)
-│   │   ├── app.graph.classifier (classifier_graph)
-│   │   ├── app.graph.agents.after_hours_agent
-│   │   │   └── app.services.store
-│   │   ├── app.graph.agents.booking_agent
-│   │   │   ├── app.services.store
-│   │   │   ├── app.services.appointment_approval
-│   │   │   │   ├── app.services.store
-│   │   │   │   ├── app.services.whatsapp
-│   │   │   │   ├── app.services.scheduler
-│   │   │   │   └── app.services.google_calendar
-│   │   │   └── app.prompts (BOOKING_ENTITY_PROMPT)
-│   │   ├── app.graph.agents.emergency_agent
-│   │   │   ├── app.services.identity
-│   │   │   └── app.services.whatsapp
-│   │   ├── app.graph.agents.lab_agent
-│   │   ├── app.graph.agents.followup_agent
-│   │   │   └── app.services.store
-│   │   └── app.graph.agents.consultation_agent  ← lazy import
-│   │       ├── app.services.store
-│   │       ├── app.services.scheduler
-│   │       ├── app.services.consultation_service
-│   │       │   ├── app.services.store
-│   │       │   ├── app.services.whatsapp
-│   │       │   └── app.services.scribe_service  ← lazy import (when JAMEEL_SCRIBE_URL empty)
-│   │       │       ├── app.graph.scribe.nodes (soap_generator_node, extract_entities_node,
-│   │       │       │     fhir_coding_node, grounding_check_node, followup_generator_node,
-│   │       │       │     pdf_output_node, overall_soap_confidence, low_confidence_section_names)
-│   │       │       │     └── app.services.terminology (lookup_snomed, lookup_rxnorm)
-│   │       │       │         └── data/terminology/snomed.json, rxnorm.json  [local tables]
-│   │       │       │         └── https://clinicaltables.nlm.nih.gov  [NLM SNOMED API]
-│   │       │       │         └── https://rxnav.nlm.nih.gov           [NLM RxNorm API]
-│   │       │       ├── app.graph.scribe.pdf_builder (ReportLab)
-│   │       │       ├── app.services.clinical_scribe (store_scribe_pdf)
-│   │       │       └── app.services.identity (find_doctor_name)
-│   │       └── app.schemas (ConsultationSession, ConsultationMessage)
-│   │
-│   ├── app.services.clinical_scribe
-│   │   ├── app.graph.scribe.pipeline (scribe_pipeline — 7 nodes)
-│   │   │   ├── app.graph.scribe.nodes (transcribe, soap, extract_entities,
-│   │   │   │     fhir_coding, grounding, followup, pdf)
-│   │   │   │     └── app.services.terminology
-│   │   │   ├── app.graph.scribe.state
-│   │   │   └── app.graph.scribe.pdf_builder (ReportLab)
-│   │   ├── app.graph.scribe.nodes (overall_soap_confidence, low_confidence_section_names)
-│   │   ├── app.services.store
-│   │   ├── app.services.whatsapp
-│   │   └── app.services.soap_approval
-│   │       ├── app.services.store
-│   │       ├── app.services.clinical_scribe (_format_fhir_whatsapp_summary, GENERATED_DIR, _pdf_store)
-│   │       ├── app.graph.scribe.nodes (fhir_coding_node, soap_generator_node, ...)
-│   │       │     └── app.services.terminology
-│   │       └── app.services.scheduler (schedule_followup_message)
-│   │
-│   ├── app.services.pdf_service
-│   │   ├── app.graph.parser.pipeline
-│   │   │   ├── app.graph.parser.nodes (pdfplumber, Groq)
-│   │   │   └── app.graph.parser.state
-│   │   ├── app.services.store
-│   │   └── app.services.whatsapp
-│   │
-│   ├── app.services.doctor
-│   │   ├── app.services.appointment_approval
-│   │   ├── app.services.soap_approval
-│   │   ├── app.services.doctor_setup
-│   │   │   └── app.services.store
-│   │   └── app.services.whatsapp
-│   │
-│   └── app.services.identity
-│
-├── app.api.parser_router
-│   └── app.graph.parser.pipeline
-│
-├── app.api.scribe_router
-│   └── app.services.scribe_service
-│
-└── app.services.scheduler (lifespan startup)
-    └── app.services.identity (for all_doctor_numbers())
+First WhatsApp message received
+  ↓
+identify_sender_async() → classified as "patient"
+  ↓
+resolve_clinic_by_twilio_number(to_number) → Clinic row
+  ↓
+upsert_patient(clinic_id, phone_number)
+  → SELECT WHERE clinic_id + phone_number
+  → INSERT if not found
+  → Returns patient_id
+  ↓
+Patient.name updated when captured during booking flow
+Patient.last_visit_at updated on every new MedicalRecord
+
+Consultation closes:
+  → scribe_service completes
+  → patient_service.save_consultation_record(patient_id, clinic_id, doctor_id, soap_data, entities, fhir_bundle)
+  → MedicalRecord INSERT with record_type="consultation"
+
+Lab report processed:
+  → patient_service.save_lab_record(patient_id, clinic_id, lab_panel_type, lab_results)
+  → MedicalRecord INSERT with record_type="lab_report"
 ```
 
-**Circular import prevention:**
-- `router.py` does NOT import `consultation_agent` at module level — import is inside `consultation_dispatch_node()` function body
-- `scheduler.py` does NOT import `router_graph` at module level — import is inside `_flush_afterhours_job()` function body
-- `consultation_service.py` does NOT import `scribe_service` at module level — import is inside `_call_jameel()` function body (only executed when a consultation ends)
-- `scribe_service.py` does NOT import any agent or router modules — it only imports scribe nodes, identity, and clinical_scribe helpers
+### 5.2 Patient Model Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID string | Primary key |
+| `clinic_id` | FK string | Owning clinic |
+| `phone_number` | String(30) | WhatsApp number in E.164 format |
+| `name` | String(255) | Optional; captured during booking |
+| `age` | Integer | Optional |
+| `gender` | String(10) | `male`, `female`, or `other` |
+| `blood_group` | String(5) | `A+`, `B-`, `O+`, etc. |
+| `allergies` | JSON array | Allergy strings; default empty list |
+| `chronic_conditions` | JSON array | Condition strings; default empty list |
+| `current_medications` | JSON array | Medication strings; default empty list |
+| `doctor_notes` | String(2000) | Free-text notes from doctor (editable via dashboard) |
+| `is_active` | Boolean | Default true |
+| `created_at` | DateTime(tz) | First WhatsApp contact |
+| `last_visit_at` | DateTime(tz) | Updated on each new MedicalRecord |
+
+### 5.3 MedicalRecord Model Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID string | Primary key |
+| `patient_id` | FK string | Owning patient |
+| `clinic_id` | FK string | Denormalized for query efficiency |
+| `doctor_id` | FK string | Nullable; attending doctor |
+| `visit_date` | DateTime(tz) | Indexed; defaults to insert time |
+| `record_type` | String(30) | `consultation`, `lab_report`, or `booking` |
+| `chief_complaint` | String(500) | Patient's stated primary concern |
+| `soap_subjective` | Text | Patient-reported symptoms and history |
+| `soap_objective` | Text | Objective findings |
+| `soap_assessment` | Text | AI/doctor assessment and differential |
+| `soap_plan` | Text | Treatment plan and follow-up instructions |
+| `soap_confidence` | Float | LLM self-reported confidence (0.0–1.0) |
+| `diagnoses` | JSON | `[{name, snomed_code, severity}]` |
+| `medications` | JSON | `[{name, rxnorm_code, frequency}]` |
+| `symptoms` | JSON | `[{name, severity, duration}]` |
+| `lab_panel_type` | String(30) | `CBC`, `LFT`, `KFT`, `LIPID`, `THYROID` |
+| `lab_results` | JSON | `{all_values, abnormals, criticals}` arrays |
+| `fhir_bundle` | JSON | Complete FHIR R4 Bundle object |
+| `pdf_url` | String(500) | Path/URL to generated PDF in `./generated/` |
+| `created_at` | DateTime(tz) | Row creation timestamp |
+
+### 5.4 Doctor Dashboard View
+
+On the `/dashboard/patients/[id]` page, clinic admins and doctors see:
+
+- **Profile card** — Name, phone, age, gender, blood group; all fields editable via `PUT /api/clinics/{clinic_id}/patients/{patient_id}`.
+- **Allergies, chronic conditions, current medications** — Displayed as chips; editable.
+- **Doctor notes** — Free-text field; editable inline.
+- **Visit timeline** — All `MedicalRecord` rows ordered by `visit_date DESC`. Each record shows: date, record type badge, doctor name, chief complaint.
+- **SOAP tabs** — Expandable per-record view of all four SOAP sections.
+- **Diagnosis chips** — Each diagnosis displayed with name + SNOMED CT code badge.
+- **Medication chips** — Name + RxNorm RxCUI badge.
+- **Lab results table** — Test name, value, reference range; abnormals highlighted in amber, criticals in red.
 
 ---
 
-## 12. Missing Pieces / TODOs
+## 6. Dashboard Architecture
 
-### Critical for production
+### 6.1 Tech Stack
 
-**1. ~~SNOMED CT + HL7 FHIR R4 validation~~ DONE (Sprint 3)**
-SNOMED CT concept IDs and RxNorm RxCUIs are assigned by the terminology lookup service (local JSON tables → NLM public API → UNKNOWN). FHIR R4 Condition and MedicationRequest resources are built programmatically. Codes appear in the PDF and the doctor's approval message. REGEN command allows regeneration with correction feedback. The LLM is not used for code assignment.
+| Component | Technology | Version |
+|---|---|---|
+| Framework | Next.js App Router | 16 |
+| Language | TypeScript | Latest |
+| Styling | Tailwind CSS | Latest |
+| UI Components | shadcn/ui (Base UI) | Latest |
+| Data Fetching | React Query (TanStack Query) | Latest |
+| Forms | react-hook-form + zod | Latest |
+| HTTP Client | axios | Latest |
+| Toast Notifications | sonner | Latest |
+| Build Output | Next.js standalone | — |
 
-**2. ~~Jameel API integration~~ DONE — scribe pipeline is fully implemented locally**
-`JAMEEL_SCRIBE_URL` is empty in `.env`. `consultation_service._call_jameel()` now calls `scribe_service.process_consultation_bundle()` directly — the full Whisper → SOAP → PDF pipeline runs locally. No stub. When Jameel's service is hosted independently, set `JAMEEL_SCRIBE_URL` to `POST /scribe/consult` and it switches to HTTP without any code changes. The `POST /scribe/consult` endpoint (`scribe_router.py`) is already live in the running app.
+### 6.2 Route Map
 
-**2. Doctor-side consultation close not fully implemented**
-`detect_end_node` in `consultation_agent.py` checks if the *incoming patient message* is a closing phrase. In the current implementation, closing a consultation via a doctor typing "ok done" goes through `handle_doctor_message()` → `doctor.py`, which does not route to `consultation_agent`. For demo, the patient sends the closing phrase. For production, doctor close should trigger `finalize_and_send()` directly from `doctor.py` or via a doctor consultation webhook branch.
+```
+/                                   — Public marketing/landing page (WhatsApp-first AI clinic pitch)
 
-**3. No persistence of MemorySaver across restarts**
-`router_graph` uses in-process `MemorySaver()`. A server restart loses all LangGraph thread checkpoints. For production: replace with `langgraph.checkpoint.redis.RedisSaver` or `langgraph.checkpoint.sqlite.SqliteSaver`.
+/auth/login                         — Login form (email + password → POST /api/auth/login → JWT saved)
+/auth/signup                        — Registration form (zod-validated; creates clinic + user atomically)
 
-**4. Demo-mode `.env` values not reverted**
-`REMINDER_MINUTES_BEFORE=2` (should be `120` in production) and `CONSULTATION_TIMEOUT_MINUTES=2` (should be `30` in production). Risk: 2-minute consultation timeout in prod would auto-close consultations after 2 minutes of silence.
+/onboarding                         — Redirects to /onboarding/clinic
+/onboarding/clinic                  — Step 1: Clinic name and basic details
+/onboarding/doctors                 — Step 2: Add initial doctors (name, specialty, WhatsApp number)
+/onboarding/twilio                  — Step 3: Enter Twilio WhatsApp number
+/onboarding/model                   — Step 4: Select AI vendor/model
+/onboarding/done                    — Step 5: Completion screen with next-steps guidance
 
-**5. ngrok URL hardcoded in `.env`**
-`PUBLIC_BASE_URL` is a specific ngrok URL that changes on every ngrok restart. PDF links in WhatsApp messages break when ngrok URL changes. For production: use a stable domain.
+/dashboard                          — Protected shell (JWT-gated); sidebar: Overview, Doctors, Patients, AI Config, Docs
+/dashboard (page)                   — Clinic overview: stats, doctor list cards, WhatsApp link copy, active model badge
+/dashboard/doctors                  — Doctors CRUD: list all doctors, invite new, edit details, deactivate
+/dashboard/patients                 — Patient list: searchable/paginated table (name, phone, last consult date)
+/dashboard/patients/[id]            — Patient detail: profile edit, medical records timeline, SOAP tabs, lab color-coding
+/dashboard/config                   — AI Config: set vendor/model/STT, upload API key, test connection, view active model
 
-**6. No authentication on debug endpoints**
-All `GET /debug/*` endpoints are publicly accessible. They return full session data, appointment records, and consultation content. Must be removed or gated behind auth for production.
+/admin                              — Superadmin panel: list all clinics, toggle active/inactive status
+/admin/clinics/[id]                 — Per-clinic detail view for superadmin inspection
 
-### Functional gaps
+/docs                               — Redirects to /docs/getting-started
+/docs/getting-started               — Getting started guide for new clinic admins
+/docs/doctor-guide                  — Guide for doctors using the WhatsApp bot
+/docs/patient-guide                 — Guide for patients interacting with the AI
+/docs/ai-models                     — Documentation on supported AI models and vendor selection
+/docs/twilio-setup                  — Twilio/WhatsApp number configuration walkthrough
+```
 
-**7. Multi-intent handling partially implemented**
-`classifier_graph` returns `all_intents` and `is_multi_intent=True` when multiple intents are detected. `router.py` `route_after_session()` only routes on the primary (highest confidence) intent. Secondary intents are discarded.
+**Sidebar navigation (in `dashboard/layout.tsx`):**
 
-**8. Follow-up message scheduling — single-voice-note path complete, consultation path pending**
-In the single-voice-note scribe path: after the doctor approves via `soap_approval._approve()`, `_schedule_followup()` calls `schedule_followup_message()` in `scheduler.py` to send a scheduled follow-up check-in to the patient. In the consultation finalization path (`finalize_and_send()` in `consultation_service.py`): `follow_up_questions` are included in the doctor WhatsApp summary but a scheduled follow-up message to the patient is not yet dispatched from this path. `FollowUpAgent` responds to reactive `followup_query` intent but has no proactive delivery mechanism for the consultation path.
+| Label | Route | Icon |
+|---|---|---|
+| Overview | `/dashboard` | LayoutDashboard |
+| Doctors | `/dashboard/doctors` | Users |
+| Patients | `/dashboard/patients` | Users2 |
+| AI Config | `/dashboard/config` | Settings |
+| Documentation | `/docs` | BookOpen |
 
-**9. Lab agent is a stub**
-`lab_agent.py` only handles the case where `lab_report_share` intent fires but no PDF is attached. The actual `pdf_service.handle_incoming_pdf()` is called directly in `webhook_router.py` for PDF attachments and bypasses the router entirely.
+### 6.3 Auth Flow
 
-**10. Google Calendar not tested**
-`GOOGLE_CALENDAR_ENABLED=False` in `.env`. The `google_calendar.py` module implements OAuth2 flow for slot availability and event creation, but has never been run in this environment. `google_credentials.json` is required but not present.
+```
+User submits login form
+  ↓
+POST /api/auth/login (email + password)
+  ↓
+FastAPI: hash compare via passlib/bcrypt
+  ↓
+create_access_token(sub=user_id) → JWT (HS256, 7-day expiry)
+  ↓
+Response: {access_token, token_type, clinic_id, user_id, role}
+  ↓
+Dashboard: saveToken(token) → localStorage
+  ↓
+axios interceptor: adds "Authorization: Bearer <token>" to all API requests
+  ↓
+FastAPI: OAuth2PasswordBearer extracts token → verify_token() → user lookup
+  ↓
+get_current_user dependency: returns ClinicUser or raises HTTP 401
+get_current_admin: raises HTTP 403 if role not in {admin, superadmin}
+get_current_superadmin: raises HTTP 403 if role != superadmin
+  ↓
+Dashboard layout.tsx: isAuthenticated() check → redirect to /auth/login if false
+```
 
-**11. No rate limiting**
-`POST /webhook/twilio` has no rate limiting. A malicious actor could flood the webhook with messages, consuming Groq API quota. Twilio does provide sender verification which partially mitigates this.
+### 6.4 Per-Clinic Model Selection
 
-**12. Whisper transcription is synchronous in single-voice-note flow**
-`_run_scribe_pipeline()` in `clinical_scribe.py` calls `scribe_pipeline.invoke()` synchronously inside an `async` function — this blocks the FastAPI event loop for large audio files. The new `scribe_service.py` (consultation bundle flow) already fixes this by wrapping `_transcribe_audio` with `asyncio.to_thread`. The fix should be backported to `clinical_scribe.py` as well.
-
-**13. No `.gitignore` check for `.env`**
-`.env` file contains live API keys (Groq, Gemini, Twilio). If committed to a public repository this would expose credentials.
-
-**14. After-hours flush: no state recovery edge case**
-`_flush_afterhours_job()` re-injects messages into `router_graph`. If the patient's `BookingSession` already has a doctor-approved appointment and they sent an after-hours message about a different topic, the re-injected message may route to the wrong sub-agent depending on current `journey_state`.
+```
+Admin navigates to /dashboard/config
+  ↓
+GET /api/clinics/{clinic_id}/config
+  → Returns: llm_vendor, llm_model, stt_model, has_groq_key (bool), has_google_key (bool), etc.
+  → API keys are NEVER returned in plain text; only boolean presence flags
+  ↓
+Admin selects vendor (groq/google/anthropic/openai), enters model name, pastes API key
+  ↓
+PUT /api/clinics/{clinic_id}/config
+  → encrypt_api_key(raw_key) → Fernet AES-128-CBC → stores in {vendor}_api_key_enc column
+  ↓
+POST /api/clinics/{clinic_id}/config/test
+  → test_llm_connection(model_config) → live inference call
+  → Returns: {success: bool, response: str, latency_ms: float}
+  ↓
+At runtime (WhatsApp webhook):
+  resolve_model_config_for_clinic(clinic_id, db) → ModelConfig row
+  llm_factory.build_llm(model_config) →
+    1. Decrypt clinic API key if present
+    2. Instantiate LangChain LLM client (ChatGroq / ChatGoogleGenerativeAI / etc.)
+    3. Fall back to global env-var key if no clinic key
+    4. Return configured LLM instance to calling agent
+```
 
 ---
 
-## 13. Questions About the Codebase
+## 7. API Reference
 
-**Q1: Why does `router_graph` use `MemorySaver()` but `booking_agent_graph` does not?**
+### 7.1 Auth Router — `/api/auth`
 
-`router_graph` is the entry point for every patient message. Its `MemorySaver` checkpoint (keyed by `thread_id = patient phone number`) is what makes LangGraph aware of conversation continuity — `add_messages` on the state's `messages` field accumulates across turns. `booking_agent_graph` is a stateless sub-agent that receives a fully-populated `BookingState` dict from the router and processes one turn. Session persistence across turns for the booking agent is handled by the application-level `BookingSession` in Redis, not LangGraph checkpoints.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/auth/signup` | None | Creates Clinic + default ModelConfig + admin ClinicUser atomically. Returns JWT. Rejects duplicate email or Twilio number with HTTP 400. |
+| POST | `/api/auth/login` | None | Validates email + password. Returns JWT with `clinic_id`, `user_id`, `role`. |
+| GET | `/api/auth/me` | Bearer JWT | Returns authenticated user profile + clinic name, Twilio number, timezone, hours. |
 
-**Q2: Why is `consultation_agent_graph` imported lazily inside `consultation_dispatch_node()`?**
+### 7.2 Clinic Router — `/api/clinics`
 
-`router.py` imports `booking_agent_graph`, `emergency_agent_graph`, etc. at module level. `consultation_agent.py` imports `consultation_service.py` which imports `store.py` and `whatsapp.py`. If `router.py` imported `consultation_agent` at module level, the Python import system would form the chain `router → consultation_agent → consultation_service → store → schemas → ...`, which would work, but is deferred to avoid a potential circular import where a module in the chain imports back from `router.py` (specifically `scheduler.py`'s `_flush_afterhours_job` importing `router_graph`). The lazy import breaks this dependency at the one point where it could cycle.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/clinics/` | Superadmin | Lists all clinics. |
+| GET | `/api/clinics/{clinic_id}` | Admin (own clinic) or Superadmin | Returns clinic detail including Twilio number. |
+| PUT | `/api/clinics/{clinic_id}` | Admin (own clinic) or Superadmin | Partial update: name, timezone, open_hour, close_hour. |
+| DELETE | `/api/clinics/{clinic_id}` | Superadmin | Soft-delete: sets `is_active=False`. |
 
-**Q3: Why does `_consultation_timeout_job()` call `asyncio.run()` directly in the scheduler thread, while `finalize_node` in the agent uses `ThreadPoolExecutor`?**
+### 7.3 Doctor Router — `/api/clinics/{clinic_id}/doctors`
 
-APScheduler jobs run in a `BackgroundScheduler` thread pool — there is no running event loop in that thread, so `asyncio.run()` works directly. LangGraph nodes run in the FastAPI request context, where `asyncio.get_event_loop().is_running()` returns `True`. Calling `asyncio.run()` inside an already-running event loop raises `RuntimeError`. The `ThreadPoolExecutor` spawns a new thread (no running loop), where `asyncio.run()` works. The code at `consultation_agent.py:193–198` detects this case explicitly.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/clinics/{clinic_id}/doctors/` | Admin or Superadmin | Lists active doctors for the clinic. |
+| POST | `/api/clinics/{clinic_id}/doctors/` | Admin or Superadmin | Creates a doctor with all scheduling fields. Returns HTTP 201. |
+| GET | `/api/clinics/{clinic_id}/doctors/{doctor_id}` | Admin or Superadmin | Fetches a single doctor's full detail. |
+| PUT | `/api/clinics/{clinic_id}/doctors/{doctor_id}` | Admin or Superadmin | Partial update of any doctor field. |
+| DELETE | `/api/clinics/{clinic_id}/doctors/{doctor_id}` | Admin or Superadmin | Soft-delete: sets `is_active=False`. |
 
-**Q4: What happens if two different patients are both in active consultation with the same doctor simultaneously, and the doctor sends a voice note?**
+### 7.4 Config Router — `/api/clinics/{clinic_id}/config`
 
-`_try_buffer_doctor_audio()` in `clinical_scribe.py` scans all `clinicai:consult:*` Redis keys and finds the first active session where `session.doctor_number == doctor_number`. If two patients are in active consultation with the same doctor, only the first match (Redis scan order, which is not deterministic) receives the buffered audio. This is a known limitation — the system assumes a doctor handles one consultation at a time.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/clinics/{clinic_id}/config/` | Admin or Superadmin | Returns LLM config; API keys shown as boolean presence flags only. Auto-creates default config row if absent. |
+| PUT | `/api/clinics/{clinic_id}/config/` | Admin or Superadmin | Updates vendor, model, STT model, and/or API keys (encrypted before storage). |
+| POST | `/api/clinics/{clinic_id}/config/test` | Admin or Superadmin | Runs live inference call with saved config. Returns `{success, response, latency_ms}`. |
 
-**Q5: How is Twilio webhook authenticity verified?**
+### 7.5 Patient Router — `/api/clinics/{clinic_id}/patients`
 
-It is not verified in the current implementation. `webhook_router.py` accepts any POST to `/webhook/twilio` without signature validation. Twilio provides `X-Twilio-Signature` header for webhook authenticity. The `twilio` Python library has `RequestValidator` for this check. This should be added before production deployment.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/clinics/{clinic_id}/patients/` | Admin or Superadmin | Paginated list of active patients; optional name/phone search filter; includes record count per patient. |
+| GET | `/api/clinics/{clinic_id}/patients/by-phone/{phone_number}` | Admin or Superadmin | Lookup patient by phone number. Declared before `/{patient_id}` to avoid route shadowing. |
+| GET | `/api/clinics/{clinic_id}/patients/{patient_id}` | Admin or Superadmin | Full patient detail: all profile fields, allergies, conditions, medications, notes. |
+| PUT | `/api/clinics/{clinic_id}/patients/{patient_id}` | Admin or Superadmin | Partial update of any patient profile field. |
+| GET | `/api/clinics/{clinic_id}/patients/{patient_id}/records` | Admin or Superadmin | Medical records timeline; optional `?type=consultation` or `?type=lab_report` filter; joins Doctor table for doctor name. |
 
-**Q6: What is `APPOINTMENT_SLOT_CANDIDATES` in `.env` and where is it used?**
+### 7.6 Webhook Router — `/webhook`
 
-The `.env` file has `APPOINTMENT_SLOT_CANDIDATES=` (empty). This appears to be a configuration variable for predefined available time slots to suggest when calendar availability is checked (`suggest_google_slots()` in `google_calendar.py`). When empty, the system falls back to computing slots from the appointment duration and buffer time set in the doctor profile.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/webhook/twilio` | None | Health check. Returns `{"status": "ok"}`. |
+| POST | `/webhook/twilio` | None (Twilio signature — not yet verified) | Main inbound handler. Accepts Form: `From`, `Body`, `NumMedia`, `MediaUrl0`, `MediaContentType0`, `ButtonPayload`. Routes to doctor or patient handler. |
 
-**Q7: What happens to the `all_intents` list in `ClassifyResponse` — is it used downstream?**
+### 7.7 Startup and Middleware
 
-`classify_node` in `classifier.py` returns `all_intents: list[dict]` and `is_multi_intent: bool`. These are stored on `ClassifierState` and propagated through `postprocess_node`. In `router.py`'s `intent_node`, `all_intents` from the classifier result is not currently extracted into `BookingState`. `BookingState` has `extracted_entities` and `bot_response` but no `all_intents` field. Secondary intents are effectively lost at the router boundary. The `ClassifyResponse` returned by `POST /classify` does include all intents for API consumers.
+Routers registered in `main.py`:
 
-**Q8: Why does `send_whatsapp_message_sync` exist alongside an async wrapper?**
-
-Many call sites are inside synchronous LangGraph nodes (e.g., `emergency_agent.py`, `scheduler.py` job functions, `clinical_scribe._try_buffer_doctor_audio()`), where `await` cannot be used. `send_whatsapp_message_sync()` uses the synchronous `twilio.rest.Client` directly. The `async send_whatsapp_message()` wraps the sync version in `asyncio.get_event_loop().run_in_executor(None, ...)` for use in FastAPI route handlers.
-
-**Q9: What is the relationship between `BookingSession.state` and `BookingSession.journey_state`?**
-
-`state` is the granular booking sub-flow state — it tracks where in the appointment booking dialog the patient is (one of 10 `BOOKING_FLOW_STATES` like GREETING, COLLECTING_INFO, CONFIRM_SLOT). `journey_state` is the high-level patient lifecycle state — it tracks the patient's overall relationship with the clinic (one of 7 `PATIENT_JOURNEY_STATES` like NEW_PATIENT, BOOKED, CONSULTATION_ACTIVE, POST_CONSULT). The router uses `journey_state` for sub-agent dispatch. The booking agent uses `state` for internal dialog management.
-
-**Q10: How does the context-aware classification work in practice?**
-
-After every successful routing, `webhook_router.py` saves `reply_message[:300]` as `session.last_bot_response`. On the next message from the same patient, `intent_node` in the router reads `session.last_bot_response` and passes it as `context_message` to `classifier_graph`. The classifier's system prompt explicitly instructs the LLM: "If `context_message` is provided, use it to disambiguate the patient's reply." For example, if the bot asked "What time works for you?" and the patient replies "3pm", without context this could be classified as `general_query`. With context, it is correctly classified as `appointment_book` continuation with `requested_time="3pm"`.
+- **Hard-registered:** `auth_router`, `clinic_router`, `doctor_api_router`, `config_router`, `patient_router`
+- **Optionally loaded** (missing modules silently skipped, except `classifier_router` which raises `RuntimeError`): `classifier_router`, `webhook_router`, `parser_router`, `scribe_router`
+- **CORS:** `allow_origins` from `DASHBOARD_URL` env var (default `http://localhost:3000`)
+- **Startup jobs:** DB table creation, APScheduler start, after-hours flush job, weekly insights job per doctor, optional demo doctor seeding (`SEED_DEMO_DOCTORS=true`)
 
 ---
 
-### Sprint 3 — Open items
+## 8. Deployment
 
-**15. NLM API calls add latency for unmapped terms**
-The terminology service makes synchronous `httpx` calls (timeout 4s) for terms not in the local JSON tables. For a typical consultation, all common Indian clinic terms resolve locally. For unusual terms, each unmatched term adds up to 4s of wait time per lookup. The local tables cover ~100 conditions and ~80 drugs. Mitigation: expand the local tables as new terms appear in production logs. Future option: cache API hits persistently in Redis across restarts.
+### 8.1 Docker Compose
 
-**16. Terminology data files require manual curation**
-`data/terminology/snomed.json` and `data/terminology/rxnorm.json` are version-controlled JSON files. New clinic-specific terms (regional drug names, speciality conditions) must be added manually. A tooling script to query the NLM APIs and append verified entries would reduce maintenance overhead.
+Four services defined in `docker-compose.yml`:
 
-**17. SNOMED CT license compliance for commercial use**
-SNOMED CT International Edition is available free for non-commercial use in most countries. Commercial deployment in India may require registration with the Indian National Release Centre or SNOMED International. NLM RxNorm is in the public domain. Verify licensing before commercial production launch.
+| Service | Image | Port | Notes |
+|---|---|---|---|
+| `postgres` | `postgres:16-alpine` | 5432 | DB/user/pass: `clinicai`/`clinicai`/`password`. Healthcheck: `pg_isready`. Named volume: `postgres_data`. |
+| `redis` | `redis:7-alpine` | 6379 | No auth configured. |
+| `api` | Built from root `Dockerfile` | 8000 | Reads `.env` file; env overrides `DATABASE_URL` and `REDIS_URL` for Docker networking. Volume mount: `./generated:/app/generated`. Depends on healthy postgres + started redis. |
+| `dashboard` | Built from `./dashboard/Dockerfile` | 3000 | Multi-stage build → standalone Next.js output. `NEXT_PUBLIC_API_URL=http://localhost:8000`. Depends on api. |
+
+**Run commands:**
+
+```bash
+# Build and start all services
+docker compose up --build
+
+# Start in background
+docker compose up --build -d
+
+# View API logs
+docker compose logs -f api
+
+# Stop all services
+docker compose down
+
+# Wipe database volume
+docker compose down -v
+```
+
+### 8.2 Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GROQ_API_KEY` | Yes | — | Groq API key for LLM + STT |
+| `GEMINI_API_KEY` | No | — | Google Gemini API key for fallback LLM |
+| `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Default Groq model name |
+| `GEMINI_MODEL` | No | `gemini-2.5-flash` | Default Gemini model name |
+| `WHISPER_MODEL` | No | `whisper-large-v3` | Groq Whisper model for STT |
+| `TWILIO_ACCOUNT_SID` | Yes | — | Twilio account SID |
+| `TWILIO_AUTH_TOKEN` | Yes | — | Twilio auth token |
+| `SOAP_APPROVAL_CONTENT_SID` | Yes | — | Twilio Content Template SID for doctor approval buttons |
+| `APPOINTMENT_APPROVAL_CONTENT_SID` | Yes | — | Twilio Content Template SID for appointment approval |
+| `TWILIO_WHATSAPP_FROM` | Yes | — | Twilio WhatsApp sender number (e.g., `whatsapp:+14155238886`) |
+| `DOCTOR_WHATSAPP_NUMBERS` | No | — | CSV of `Name:+number` or bare `+number`; env-var doctor registry |
+| `CLINIC_NAME` | No | `ClinicAI` | Default clinic display name |
+| `SEED_DEMO_DOCTORS` | No | `false` | Seed demo doctor rows into DB on startup |
+| `REMINDER_MINUTES_BEFORE` | No | `120` | Minutes before appointment to send reminder |
+| `DEMO_REMINDER_DELAY_MINUTES` | No | `2` | Demo mode: reminder fires after N minutes |
+| `FOLLOWUP_DEFAULT_DAYS` | No | `2` | Days after consultation to send follow-up |
+| `DEMO_FOLLOWUP_DELAY_MINUTES` | No | `3` | Demo mode: follow-up fires after N minutes |
+| `REDIS_URL` | No | `redis://localhost:6379` | Redis connection URL |
+| `DATABASE_URL` | Yes | `postgresql+asyncpg://clinicai:password@localhost:5432/clinicai` | PostgreSQL async connection URL |
+| `SECRET_KEY` | Yes | — | JWT signing secret (HS256); use a long random string in production |
+| `ENCRYPTION_KEY` | Yes | — | Fernet key for API key encryption; generate with `Fernet.generate_key()` |
+| `DASHBOARD_URL` | No | `http://localhost:3000` | Dashboard origin for CORS allow_origins |
+| `CLINIC_OPEN_HOUR` | No | `9` | Hour (0-23) when clinic opens; used by AfterHoursAgent |
+| `CLINIC_CLOSE_HOUR` | No | `20` | Hour (0-23) when clinic closes |
+| `CONSULTATION_TIMEOUT_MINUTES` | No | `30` (2 in demo) | Minutes of inactivity before consultation auto-closes |
+| `JAMEEL_SCRIBE_URL` | No | — | External scribe service URL (integration contract; empty = use local scribe) |
+| `GOOGLE_CALENDAR_ENABLED` | No | `False` | Enable Google Calendar event creation on booking |
+| `GOOGLE_CALENDAR_CREDENTIALS_FILE` | No | `google_credentials.json` | Service account credentials path |
+| `GOOGLE_CALENDAR_TOKEN_FILE` | No | `google_token.json` | OAuth token cache path |
+| `GOOGLE_CALENDAR_ID` | No | `primary` | Target calendar ID |
+| `GOOGLE_CALENDAR_TIMEZONE` | No | `Asia/Kolkata` | Calendar timezone |
+| `APPOINTMENT_DURATION_MINUTES` | No | `30` | Default appointment slot length |
+| `APPOINTMENT_SLOT_CANDIDATES` | No | — | Pre-defined slot candidates (optional override) |
+| `PUBLIC_BASE_URL` | Yes (for Twilio) | — | Public-facing URL for webhook (e.g., ngrok URL in development) |
+
+### 8.3 Local Development Setup
+
+**Prerequisites:** Python 3.12, Node.js 20, Docker, PostgreSQL 16, Redis 7.
+
+**Option A — Docker Compose (recommended):**
+
+```bash
+# 1. Copy and populate environment
+cp .env.example .env    # (no .env.example exists yet; create .env manually)
+
+# 2. Build and start all services
+docker compose up --build
+
+# API available at: http://localhost:8000
+# Dashboard available at: http://localhost:3000
+# API docs (Swagger): http://localhost:8000/docs
+```
+
+**Option B — Manual (API only):**
+
+```bash
+# 1. Create virtual environment
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS/Linux
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Populate .env (DATABASE_URL + REDIS_URL pointing to local services)
+
+# 4. Run API
+uvicorn main:app --reload --port 8000
+```
+
+**Option C — Dashboard only:**
+
+```bash
+cd dashboard
+npm install
+npm run dev
+# Dashboard available at: http://localhost:3000
+```
+
+**Database migrations:**
+
+```bash
+# Run Alembic migrations (first-time setup)
+alembic upgrade head
+
+# Generate a new migration after model changes
+alembic revision --autogenerate -m "description of change"
+```
+
+**Twilio webhook setup (development):**
+
+```bash
+# Expose local API via ngrok
+ngrok http 8000
+
+# Set PUBLIC_BASE_URL in .env to the ngrok HTTPS URL
+# Configure Twilio WhatsApp sandbox webhook URL to:
+# https://<ngrok-subdomain>.ngrok.io/webhook/twilio
+```
+
+**Running tests:**
+
+```bash
+pytest
+# Note: pytest is installed but no test files exist yet (see Known Limitations)
+```
 
 ---
 
-*Report updated from live codebase at `D:\ClinicAI` on 2026-05-29. Sprint 3 complete — SNOMED CT + HL7 FHIR R4 validation pipeline implemented with authoritative terminology lookup layer.*
+## 9. Known Limitations
+
+The following are tracked technical gaps and deferred work items as of Sprint 4.
+
+1. **APScheduler in-process — no persistent jobstore.** All scheduled jobs (reminders, after-hours flush, weekly insights) are registered in-memory. A server restart drops all pending jobs. Fix: configure APScheduler with a Redis jobstore (`RedisJobStore` via `apscheduler.jobstores.redis`).
+
+2. **LangGraph MemorySaver in RAM — booking sub-state not crash-resilient.** `MemorySaver` checkpoints the RouterAgent and sub-agent state graphs in process memory. If the API server restarts mid-booking, the patient's state machine is lost and they receive a confused response. Fix: replace `MemorySaver` with a Redis or PostgreSQL checkpoint store.
+
+3. **Doctor-side consultation close does not trigger scribe.** The scribe pipeline (SOAP generation, FHIR coding, PDF, MedicalRecord write) only fires when the patient sends a closing phrase or the inactivity timeout fires. If only the doctor closes, the session data is never persisted. Fix: detect `doctor_close` intent in `handle_doctor_message()` and call the scribe pipeline explicitly.
+
+4. **`DOCTOR_WHATSAPP_NUMBERS` env var takes priority over DB doctors.** `identify_sender_async()` checks the env var first; DB lookup is a fallback. This means manually deactivating a doctor in the database does not immediately prevent them from being recognized as a doctor if their number is still in the env var. Fix: remove env-var checking from `identify_sender_async()` or make DB the authoritative source.
+
+5. **No test suite.** `pytest` and `pytest-asyncio` are installed but `D:\ClinicAI` contains zero test files. No unit, integration, or end-to-end tests exist. All validation is manual. Fix: add `tests/` directory with at minimum: model creation tests, `upsert_patient` behavior, `identify_sender` resolution logic, and scribe pipeline unit tests.
+
+6. **No CI/CD pipeline or container health checks.** No GitHub Actions, no pre-commit hooks, no automated build validation. The `docker-compose.yml` has a healthcheck on postgres but not on the `api` or `dashboard` containers. Fix: add GitHub Actions workflow for lint + test on push; add `HEALTHCHECK` instructions to both Dockerfiles.
+
+7. **`clinic_id` not reliably propagated through WhatsApp sessions.** `patient_service.upsert_patient()` requires `clinic_id`, which comes from `resolve_clinic_by_twilio_number(to_number)`. If the `to_number` does not match any `Clinic.twilio_number` in the database (e.g., during single-tenant deployments with only env-var config), clinic resolution returns `None` and patient rows are written without a valid `clinic_id`, breaking foreign key integrity. Fix: enforce clinic resolution at startup or seed a default clinic row matched to `TWILIO_WHATSAPP_FROM`.
+
+---
+
+## 10. Security Notes
+
+The following security properties and gaps apply to the current codebase. Auditors and engineers deploying to production should address all items marked as requiring action.
+
+| Area | Current State | Production Recommendation |
+|---|---|---|
+| **JWT algorithm** | HS256, 7-day expiry | Use shorter expiry (e.g., 15 minutes) with refresh token rotation. Consider RS256 for multi-service deployments. |
+| **JWT secret** | `SECRET_KEY` env var | Use a cryptographically random 256-bit secret. Rotate on compromise. |
+| **API key storage** | Fernet (AES-128-CBC) encrypted, stored in `model_configs` table | Current approach is acceptable. Ensure `ENCRYPTION_KEY` is stored in a secrets manager (e.g., AWS Secrets Manager, HashiCorp Vault), not in `.env`. |
+| **API key exposure** | Config GET returns boolean presence flags only; keys never returned in API responses | Maintain this invariant. Add an audit log for key updates. |
+| **WhatsApp webhook auth** | No Twilio request signature validation | Implement Twilio signature verification using `twilio.request_validator.RequestValidator`. Without this, any HTTP client can inject fake WhatsApp messages. |
+| **CORS** | `allow_origins=[DASHBOARD_URL]` (env var) | Correct approach. Verify `DASHBOARD_URL` is set to the production domain, not `*`. |
+| **Debug endpoints** | `/debug/*` endpoints expose Redis session data | Gate all `/debug/*` routes behind `get_current_superadmin` dependency or remove from production builds. |
+| **Password hashing** | bcrypt via passlib | Correct. Ensure `bcrypt==4.0.1` is pinned and audited for known CVEs. |
+| **Database credentials** | Hardcoded defaults (`clinicai`/`password`) in `docker-compose.yml` | Replace with secrets injection (Docker secrets or env var overrides). Never commit production credentials. |
+| **`.env` file** | Present in repo root; not in `.gitignore` (confirm) | Ensure `.env` is in `.gitignore`. Create `.env.example` with all keys and placeholder values for new developers. |
+| **Multi-tenancy isolation** | All API routes check `clinic_id` ownership via `get_current_admin` | Verify every data-access path filters by `clinic_id`. A superadmin can currently access all clinics by design. |
+| **HTTPS** | Not configured in Docker Compose or FastAPI | Use a reverse proxy (nginx, Caddy, or AWS ALB) to terminate TLS in production. Never expose the FastAPI server directly on port 8000. |

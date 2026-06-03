@@ -21,7 +21,7 @@ groq==0.13.1
 redis==5.2.1
 hiredis==3.0.0
 
-twilio==9.3.6
+# twilio==9.3.6  # replaced by Meta Cloud API (httpx-based, no SDK needed)
 apscheduler==3.10.4
 google-api-python-client==2.154.0
 google-auth==2.36.0

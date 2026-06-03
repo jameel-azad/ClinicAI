@@ -7,7 +7,6 @@ import traceback
 import uuid
 from pathlib import Path
 
-import httpx
 import pdfplumber
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -18,6 +17,8 @@ try:
 except ImportError:
     lab_report_pipeline = None
     print("Warning: Could not import app.graph.parser.pipeline")
+
+from app.services.whatsapp import download_media_bytes
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -56,21 +57,14 @@ def _lab_pdf_public_url(document_id: str) -> str | None:
     return f"{base_url}/lab-report/pdf/{document_id}"
 
 
-async def download_media(media_url: str) -> str:
-    """Download media from Twilio to a temporary PDF file and return the path."""
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-
-    auth = (account_sid, auth_token) if account_sid and auth_token else None
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(media_url, auth=auth, follow_redirects=True)
-        response.raise_for_status()
-
-        fd, temp_path = tempfile.mkstemp(suffix=".pdf")
-        with os.fdopen(fd, "wb") as f:
-            f.write(response.content)
-
+async def download_media(media_id: str) -> str:
+    """Download media from Meta via media_id to a temporary PDF file and return the path."""
+    pdf_bytes = await download_media_bytes(media_id)
+    if pdf_bytes is None:
+        raise RuntimeError(f"Failed to download media for media_id={media_id}")
+    fd, temp_path = tempfile.mkstemp(suffix=".pdf")
+    with os.fdopen(fd, "wb") as f:
+        f.write(pdf_bytes)
     return temp_path
 
 
@@ -152,7 +146,7 @@ def format_report_reply(state: dict) -> str:
     return "\n".join(reply_lines)
 
 
-async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
+async def handle_incoming_pdf(media_id: str, from_number: str = "") -> str:
     """
     Handle a WhatsApp PDF from a patient:
     1. Download + safety check + parse (pipeline runs in a thread to avoid blocking the event loop)
@@ -164,7 +158,7 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
 
     temp_path = None
     try:
-        temp_path = await download_media(media_url)
+        temp_path = await download_media(media_id)
 
         if not await asyncio.to_thread(check_safety, temp_path):
             return "This document does not appear to be a valid lab report or could not be verified for safety."

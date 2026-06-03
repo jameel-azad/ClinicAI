@@ -72,6 +72,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         "date_str": session.requested_date,
         "time_str": session.requested_time,
         "symptoms": session.symptoms,
+        "clinic_id": session.clinic_id,
         "status": "waiting_doctor",
     }
     save_pending_approval(approval)
@@ -206,16 +207,16 @@ def is_slot_available(
     for appt in all_appointments().values():
         if (
             _same(appt.get("doctor_name"), doctor_name)
-            and _same(appt.get("date_str"), date_str)
-            and _same(appt.get("time_str"), time_str)
+            and _same_date(appt.get("date_str"), date_str)
+            and _same_time(appt.get("time_str"), time_str)
         ):
             return False, "Local calendar already has a confirmed appointment."
 
     for approval in get_waiting_approvals_for_doctor(find_doctor_number(doctor_name) or ""):
         if (
             _same(approval.get("doctor_name"), doctor_name)
-            and _same(approval.get("date_str"), date_str)
-            and _same(approval.get("time_str"), time_str)
+            and _same_date(approval.get("date_str"), date_str)
+            and _same_time(approval.get("time_str"), time_str)
         ):
             return False, "Local calendar already has a pending request for that slot."
 
@@ -257,6 +258,29 @@ def _approve(approval: dict) -> str:
         symptoms=approval.get("symptoms"),
     )
     save_appointment(appt)
+
+    # Persist patient to DB on confirmed appointment (idempotent — unique on clinic+phone)
+    clinic_id = approval.get("clinic_id")
+    if clinic_id:
+        try:
+            import asyncio
+            from app.services.patient_service import upsert_patient
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                upsert_patient(clinic_id, approval["patient_number"], approval.get("patient_name"))
+            )
+        except RuntimeError:
+            # Called from a background thread — use run_async fallback
+            try:
+                from app.services.async_runner import run_async
+                run_async(
+                    upsert_patient(clinic_id, approval["patient_number"], approval.get("patient_name")),
+                    timeout=10,
+                )
+            except Exception as _pe:
+                print(f"[WARN] Could not persist patient on approval: {_pe}")
+        except Exception as _pe:
+            print(f"[WARN] Could not persist patient on approval: {_pe}")
     google_event_id = create_google_calendar_event(approval)
     update_pending_approval(
         appointment_id,
@@ -323,6 +347,50 @@ def _approval_id(message: str) -> str | None:
 
 def _same(left: str | None, right: str | None) -> bool:
     return (left or "").strip().lower() == (right or "").strip().lower()
+
+
+def _normalize_date(date_str: str | None) -> str | None:
+    """Normalize a free-text date string to YYYY-MM-DD for reliable comparison.
+    Falls back to the lowercased raw string when parsing fails.
+    """
+    if not date_str:
+        return None
+    try:
+        from app.services.scheduler import _resolve_appointment_datetime
+        dt = _resolve_appointment_datetime(date_str, "12:00 PM")
+        if dt:
+            return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return date_str.strip().lower()
+
+
+def _normalize_time(time_str: str | None) -> str | None:
+    """Normalize a free-text time string to HH:MM (24 h) for reliable comparison."""
+    if not time_str:
+        return None
+    import re as _re
+    t = time_str.strip().lower()
+    m = _re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", t)
+    if not m:
+        return t
+    hr, mn = int(m.group(1)), int(m.group(2) or "0")
+    mer = m.group(3)
+    if mer == "pm" and hr != 12:
+        hr += 12
+    elif mer == "am" and hr == 12:
+        hr = 0
+    return f"{hr:02d}:{mn:02d}"
+
+
+def _same_date(left: str | None, right: str | None) -> bool:
+    nl, nr = _normalize_date(left), _normalize_date(right)
+    return nl is not None and nl == nr
+
+
+def _same_time(left: str | None, right: str | None) -> bool:
+    nl, nr = _normalize_time(left), _normalize_time(right)
+    return nl is not None and nl == nr
 
 
 def _format_symptoms(symptoms: list[str] | None) -> str:

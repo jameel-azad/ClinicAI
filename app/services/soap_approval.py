@@ -80,6 +80,7 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
         if sent:
             _mark_post_consult(patient_number)
             _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days)
+            _save_consultation_record(soap, patient_number, patient_name, public_url)
             return f"✅ Prescription note approved and sent to {patient_number}."
         return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please send manually."
 
@@ -220,6 +221,37 @@ def _mark_post_consult(patient_number: str) -> None:
         print(f"[SOAP] journey_state → POST_CONSULT for {patient_number}")
     except Exception as exc:
         print(f"[SOAP] Could not update patient session to POST_CONSULT: {exc}")
+
+
+def _save_consultation_record(soap: dict, patient_number: str, patient_name: str, pdf_url: str | None) -> None:
+    """Fire-and-forget: persist consultation to DB so it appears in the dashboard."""
+    try:
+        import asyncio
+        from app.services.store import get_session
+        from app.services.patient_service import save_consultation_record
+
+        booking = get_session(patient_number)
+        clinic_id = booking.clinic_id if booking else None
+        if not clinic_id:
+            return
+
+        soap_result = {
+            "soap_note": soap.get("soap_note") or {},
+            "clinical_entities": soap.get("clinical_entities") or {},
+            "fhir_bundle": soap.get("fhir_bundle") or {},
+            "soap_note_pdf_url": pdf_url,
+        }
+        loop = asyncio.get_running_loop()
+        loop.create_task(save_consultation_record(
+            clinic_id=clinic_id,
+            patient_phone=patient_number,
+            patient_name=patient_name,
+            doctor_phone=soap.get("doctor_number"),
+            chief_complaint=None,
+            soap_result=soap_result,
+        ))
+    except Exception as exc:
+        print(f"[SOAP] Could not save consultation record: {exc}")
 
 
 def _schedule_followup(

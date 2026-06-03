@@ -141,28 +141,29 @@ async def finalize_and_send(patient_number: str) -> str:
             booking_session.symptoms = booking_session.symptoms or []
         save_session(booking_session)
 
-    delete_consultation(patient_number)
-    print(f"[ConsultationService] ConsultationSession deleted for {patient_number}")
-
-    # Persist medical record to PostgreSQL (non-blocking — failure must not affect WhatsApp flow)
+    # Persist medical record BEFORE deleting the consultation session.
+    # Using await (not asyncio.create_task) so the DB write is not cancelled
+    # by event-loop cleanup before it completes.
     try:
         from app.services.patient_service import save_consultation_record
-        from app.services.clinic_resolver import resolve_clinic_by_twilio_number
-        # Resolve clinic from booking session's "to" number
-        booking = get_session(patient_number)
-        clinic_id = getattr(booking, "clinic_id", None) if booking else None
-        if clinic_id:
-            import asyncio
-            asyncio.create_task(save_consultation_record(
-                clinic_id=clinic_id,
+        # Prefer clinic_id from the ConsultationSession itself; fall back to BookingSession
+        _clinic_id = getattr(session, "clinic_id", None)
+        if not _clinic_id and booking_session:
+            _clinic_id = getattr(booking_session, "clinic_id", None)
+        if _clinic_id:
+            await save_consultation_record(
+                clinic_id=_clinic_id,
                 patient_phone=patient_number,
-                patient_name=getattr(booking, "patient_name", None) if booking else None,
+                patient_name=getattr(booking_session, "patient_name", None) if booking_session else None,
                 doctor_phone=session.doctor_number,
-                chief_complaint=getattr(booking, "symptoms", None) if booking else None,
+                chief_complaint=getattr(booking_session, "symptoms", None) if booking_session else None,
                 soap_result=result,
-            ))
+            )
     except Exception as _exc:
         print(f"[ConsultationService] Non-fatal: failed to save patient record: {_exc}")
+
+    delete_consultation(patient_number, clinic_id=getattr(session, "clinic_id", None))
+    print(f"[ConsultationService] ConsultationSession deleted for {patient_number}")
 
     return (
         "Your consultation has been recorded. "

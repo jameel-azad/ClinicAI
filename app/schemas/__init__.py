@@ -190,6 +190,10 @@ class BookingState(TypedDict):
     appointment_id: Optional[str]
     is_off_topic: bool
     pipeline_log: Annotated[list[str], operator.add]
+    # Clinic context — resolved from Twilio "To" number in webhook
+    clinic_id: Optional[str]
+    clinic_open_hour: int
+    clinic_close_hour: int
 
 
 # ── Consultation Models (Sprint 2) ────────────────────────────────────────────
@@ -207,6 +211,7 @@ class ConsultationSession(BaseModel):
     patient_number: str
     doctor_number: str
     doctor_name: str
+    clinic_id: Optional[str] = None         # isolates sessions per clinic (multi-tenant)
     appointment_id: Optional[str] = None
     messages: list[ConsultationMessage] = Field(default_factory=list)
     audio_files: list[dict] = Field(default_factory=list)   # {url, duration_secs} for Jameel bundle

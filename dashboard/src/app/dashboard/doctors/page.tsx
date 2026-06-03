@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
-import { useForm, type Resolver } from "react-hook-form"
+import { useForm, Controller, type Resolver } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import { Plus, Pencil, UserX, Users } from "lucide-react"
@@ -15,6 +15,13 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Card,
   CardHeader,
@@ -39,6 +46,42 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog"
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const SPECIALTIES = [
+  "General Physician",
+  "Cardiologist",
+  "Dermatologist",
+  "Neurologist",
+  "Orthopedist",
+  "Pediatrician",
+  "Gynecologist",
+  "Psychiatrist",
+  "ENT Specialist",
+  "Ophthalmologist",
+  "Urologist",
+  "Gastroenterologist",
+  "Pulmonologist",
+  "Endocrinologist",
+]
+
+const HOURS = Array.from({ length: 17 }, (_, i) => i + 6) // 06:00 – 22:00
+
+const APPOINTMENT_DURATIONS = [
+  { value: 15, label: "15 min" },
+  { value: 20, label: "20 min" },
+  { value: 30, label: "30 min" },
+  { value: 45, label: "45 min" },
+  { value: 60, label: "60 min" },
+]
+
+const BUFFER_OPTIONS = [
+  { value: 0, label: "No buffer" },
+  { value: 5, label: "5 min" },
+  { value: 10, label: "10 min" },
+  { value: 15, label: "15 min" },
+]
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -79,11 +122,12 @@ function DoctorForm({
   const {
     register,
     handleSubmit,
+    control,
     formState: { errors },
   } = useForm<DoctorFormData>({
     resolver: zodResolver(doctorSchema) as Resolver<DoctorFormData>,
     defaultValues: {
-      working_hours_start: 8,
+      working_hours_start: 9,
       working_hours_end: 18,
       appointment_duration_minutes: 30,
       buffer_minutes: 5,
@@ -93,6 +137,7 @@ function DoctorForm({
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
+      {/* Full Name */}
       <div className="grid gap-1.5">
         <Label htmlFor="name">Full Name</Label>
         <Input id="name" placeholder="Dr. Jane Smith" {...register("name")} />
@@ -101,77 +146,111 @@ function DoctorForm({
         )}
       </div>
 
+      {/* Specialty — dropdown */}
       <div className="grid gap-1.5">
         <Label htmlFor="specialty">Specialty</Label>
-        <Input
-          id="specialty"
-          placeholder="General Practitioner"
-          {...register("specialty")}
+        <Controller
+          name="specialty"
+          control={control}
+          render={({ field }) => (
+            <Select value={field.value} onValueChange={field.onChange}>
+              <SelectTrigger id="specialty" className="w-full">
+                <SelectValue placeholder="Select specialty" />
+              </SelectTrigger>
+              <SelectContent>
+                {SPECIALTIES.map((s) => (
+                  <SelectItem key={s} value={s}>{s}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         />
         {errors.specialty && (
-          <p className="text-xs text-destructive">
-            {errors.specialty.message}
-          </p>
+          <p className="text-xs text-destructive">{errors.specialty.message}</p>
         )}
       </div>
 
+      {/* WhatsApp Number */}
       <div className="grid gap-1.5">
         <Label htmlFor="whatsapp_number">WhatsApp Number</Label>
         <Input
           id="whatsapp_number"
-          placeholder="+1234567890"
+          placeholder="whatsapp:+919876543210"
           {...register("whatsapp_number")}
         />
+        <p className="text-xs text-muted-foreground">Format: whatsapp:+[country code][number]</p>
         {errors.whatsapp_number && (
-          <p className="text-xs text-destructive">
-            {errors.whatsapp_number.message}
-          </p>
+          <p className="text-xs text-destructive">{errors.whatsapp_number.message}</p>
         )}
       </div>
 
+      {/* Working Hours — dropdowns */}
       <div className="grid grid-cols-2 gap-3">
         <div className="grid gap-1.5">
-          <Label htmlFor="working_hours_start">Start Hour (0–23)</Label>
-          <Input
-            id="working_hours_start"
-            type="number"
-            min={0}
-            max={23}
-            {...register("working_hours_start", { valueAsNumber: true })}
+          <Label>Start Time</Label>
+          <Controller
+            name="working_hours_start"
+            control={control}
+            render={({ field }) => (
+              <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {HOURS.map((h) => (
+                    <SelectItem key={h} value={String(h)}>
+                      {String(h).padStart(2, "0")}:00
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           />
-          {errors.working_hours_start && (
-            <p className="text-xs text-destructive">
-              {errors.working_hours_start.message}
-            </p>
-          )}
         </div>
         <div className="grid gap-1.5">
-          <Label htmlFor="working_hours_end">End Hour (0–23)</Label>
-          <Input
-            id="working_hours_end"
-            type="number"
-            min={0}
-            max={23}
-            {...register("working_hours_end", { valueAsNumber: true })}
+          <Label>End Time</Label>
+          <Controller
+            name="working_hours_end"
+            control={control}
+            render={({ field }) => (
+              <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {HOURS.map((h) => (
+                    <SelectItem key={h} value={String(h)}>
+                      {String(h).padStart(2, "0")}:00
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           />
-          {errors.working_hours_end && (
-            <p className="text-xs text-destructive">
-              {errors.working_hours_end.message}
-            </p>
-          )}
         </div>
       </div>
 
+      {/* Appointment Duration + Buffer — dropdowns */}
       <div className="grid grid-cols-2 gap-3">
         <div className="grid gap-1.5">
-          <Label htmlFor="appointment_duration_minutes">
-            Appointment (min)
-          </Label>
-          <Input
-            id="appointment_duration_minutes"
-            type="number"
-            min={5}
-            {...register("appointment_duration_minutes", { valueAsNumber: true })}
+          <Label>Appointment Duration</Label>
+          <Controller
+            name="appointment_duration_minutes"
+            control={control}
+            render={({ field }) => (
+              <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {APPOINTMENT_DURATIONS.map((d) => (
+                    <SelectItem key={d.value} value={String(d.value)}>
+                      {d.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           />
           {errors.appointment_duration_minutes && (
             <p className="text-xs text-destructive">
@@ -180,19 +259,30 @@ function DoctorForm({
           )}
         </div>
         <div className="grid gap-1.5">
-          <Label htmlFor="buffer_minutes">Buffer (min)</Label>
-          <Input
-            id="buffer_minutes"
-            type="number"
-            min={0}
-            {...register("buffer_minutes", { valueAsNumber: true })}
+          <Label>Buffer Time</Label>
+          <Controller
+            name="buffer_minutes"
+            control={control}
+            render={({ field }) => (
+              <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {BUFFER_OPTIONS.map((b) => (
+                    <SelectItem key={b.value} value={String(b.value)}>
+                      {b.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           />
         </div>
       </div>
 
       <DialogFooter className="border-none bg-transparent p-0">
         <DialogClose render={<Button variant="outline" type="button">Cancel</Button>} />
-
         <Button type="submit" disabled={isPending}>
           {isPending ? "Saving…" : "Save"}
         </Button>

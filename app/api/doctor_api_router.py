@@ -22,12 +22,27 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, get_current_user
 from app.models.clinic import Clinic
 from app.models.doctor import Doctor
 from app.models.user import ClinicUser
+
+
+async def _sync_doctor_caches(db: AsyncSession) -> None:
+    """Refresh the identity cache and Redis store whenever any doctor changes."""
+    try:
+        result = await db.execute(select(Doctor).where(Doctor.is_active.is_(True)))
+        all_active = result.scalars().all()
+        from app.services.identity import refresh_db_doctors_cache
+        from app.services.doctor_directory import sync_doctors_to_store
+        refresh_db_doctors_cache(all_active)
+        sync_doctors_to_store(all_active)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("[doctor_api] Cache sync failed: %s", exc)
 
 router = APIRouter(
     prefix="/api/clinics/{clinic_id}/doctors",
@@ -155,8 +170,16 @@ async def create_doctor(
         buffer_minutes=body.buffer_minutes,
     )
     db.add(doctor)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A doctor with this WhatsApp number already exists in this clinic.",
+        )
     await db.refresh(doctor)
+    await _sync_doctor_caches(db)
     return doctor
 
 
@@ -207,8 +230,16 @@ async def update_doctor(
     if body.buffer_minutes is not None:
         doctor.buffer_minutes = body.buffer_minutes
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A doctor with this WhatsApp number already exists in this clinic.",
+        )
     await db.refresh(doctor)
+    await _sync_doctor_caches(db)
     return doctor
 
 
@@ -228,4 +259,5 @@ async def delete_doctor(
     doctor = await _get_doctor_or_404(doctor_id, clinic_id, db)
     doctor.is_active = False
     await db.commit()
+    await _sync_doctor_caches(db)
     return {"detail": f"Doctor {doctor_id} deactivated"}

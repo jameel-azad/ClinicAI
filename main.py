@@ -48,6 +48,12 @@ def _graph_nodes(graph: Any | None) -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio as _asyncio
+    # Register the main event loop so APScheduler jobs and synchronous LangGraph
+    # nodes can run async coroutines on it (shares the DB connection pool).
+    from app.services.async_runner import set_main_loop
+    set_main_loop(_asyncio.get_running_loop())
+
     # Create DB tables at startup
     try:
         from app.database import engine, Base
@@ -61,39 +67,39 @@ async def lifespan(app: FastAPI):
     print("  ClinicAI - Sprint 2 Multi-Agent System")
     print("=" * 60)
 
+    # ── Sync DB doctors into identity cache + Redis store ──────────────────
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.doctor import Doctor as _Doctor
+        from sqlalchemy import select as _select
+        from app.services.identity import refresh_db_doctors_cache
+        from app.services.doctor_directory import sync_doctors_to_store
+
+        async with AsyncSessionLocal() as _db:
+            _result = await _db.execute(_select(_Doctor).where(_Doctor.is_active.is_(True)))
+            _db_doctors = _result.scalars().all()
+
+        refresh_db_doctors_cache(_db_doctors)
+        from app.services.doctor_directory import reset_store_to_db_doctors
+        reset_store_to_db_doctors(_db_doctors)
+        print(f"  Loaded {len(_db_doctors)} doctor(s) from DB — stale/demo profiles cleared")
+    except Exception as _exc:
+        print(f"  [WARN] DB doctor sync failed: {_exc}")
+
     if scheduler is not None:
         if not getattr(scheduler, "running", False):
             scheduler.start()
         print("  APScheduler ready — reminder + consultation timeout + after-hours flush + weekly insights jobs available")
 
-        # Register after-hours flush for all configured doctors
+        # Register after-hours flush and weekly insights for ALL doctors (env + DB)
         try:
             from app.services.identity import all_doctor_numbers
-            from app.services.scheduler import schedule_afterhours_flush
+            from app.services.scheduler import schedule_afterhours_flush, schedule_weekly_insights
             for doc_num in all_doctor_numbers():
                 schedule_afterhours_flush(doc_num)
-        except Exception as _exc:
-            print(f"  [WARN] After-hours flush registration failed: {_exc}")
-
-        # Register weekly insights for all configured doctors
-        try:
-            from app.services.scheduler import schedule_weekly_insights
-            for doc_num in all_doctor_numbers():
                 schedule_weekly_insights(doc_num)
         except Exception as _exc:
-            print(f"  [WARN] Weekly insights registration failed: {_exc}")
-
-    # Seed demo doctors when SEED_DEMO_DOCTORS=true
-    import os as _os
-    if _os.getenv("SEED_DEMO_DOCTORS", "").lower() == "true":
-        try:
-            from app.services.doctor_directory import seed_demo_doctors
-            seed_demo_doctors()
-            print("  Demo doctors seeded (SEED_DEMO_DOCTORS=true)")
-        except Exception as _exc:
-            print(f"  [WARN] Demo doctor seeding failed: {_exc}")
-    else:
-        print("  APScheduler not configured — scheduler module not found")
+            print(f"  [WARN] Scheduler job registration failed: {_exc}")
 
     print(f"  Classifier graph nodes: {_graph_nodes(classifier_graph)}")
     if booking_graph is not None:

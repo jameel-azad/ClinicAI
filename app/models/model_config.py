@@ -21,6 +21,7 @@ class ModelConfig(Base):
     llm_model: Mapped[str] = mapped_column(
         String(100), default="llama-3.3-70b-versatile", nullable=False
     )
+    stt_vendor: Mapped[str] = mapped_column(String(20), default="groq", nullable=False)
     stt_model: Mapped[str] = mapped_column(
         String(100), default="whisper-large-v3-turbo", nullable=False
     )

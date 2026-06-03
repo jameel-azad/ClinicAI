@@ -32,14 +32,31 @@ def store_lab_pdf(pdf_path: str) -> tuple[str, str]:
     document_id = str(uuid.uuid4())
     target = LAB_PDF_DIR / f"{document_id}.pdf"
     shutil.copyfile(pdf_path, target)
-    _lab_pdf_store[document_id] = str(target)
-    return document_id, str(target)
+    stored_path = str(target)
+    _lab_pdf_store[document_id] = stored_path
+    # Register in Redis so other workers can serve this PDF
+    try:
+        from app.services.store import register_pdf
+        register_pdf("lab", document_id, stored_path)
+    except Exception:
+        pass
+    return document_id, stored_path
 
 
 def get_lab_pdf_path(document_id: str) -> str | None:
+    # 1. In-process cache (fastest, same worker)
     stored = _lab_pdf_store.get(document_id)
     if stored and os.path.exists(stored):
         return stored
+    # 2. Cross-worker Redis registry
+    try:
+        from app.services.store import lookup_pdf
+        redis_path = lookup_pdf("lab", document_id)
+        if redis_path and os.path.exists(redis_path):
+            return redis_path
+    except Exception:
+        pass
+    # 3. Filesystem fallback (shared volume)
     target = LAB_PDF_DIR / f"{document_id}.pdf"
     return str(target) if target.exists() else None
 
@@ -193,8 +210,27 @@ async def handle_incoming_pdf(media_url: str, from_number: str = "") -> str:
             save_pending_lab_review(lab_id, {
                 "patient_number": from_number,
                 "patient_name": patient_info.get("name") or "",
-                "doctor_number": doctor_numbers[0],
+                "doctor_number": doctor_numbers[0],   # primary for ACK lookup
+                "doctor_numbers": doctor_numbers,      # full list for multi-doctor awareness
             })
+
+        # Save lab record to DB so it appears in dashboard medical history
+        try:
+            from app.services.store import get_session
+            from app.services.patient_service import save_lab_record
+            booking = get_session(from_number)
+            clinic_id = booking.clinic_id if booking else None
+            if clinic_id:
+                patient_info = final_state.get("patient_info") or {}
+                await save_lab_record(
+                    clinic_id=clinic_id,
+                    patient_phone=from_number,
+                    patient_name=patient_info.get("name"),
+                    lab_result=final_state,
+                    pdf_url=pdf_url,
+                )
+        except Exception as _le:
+            print(f"[PDF] Could not save lab record: {_le}")
 
         criticals = final_state.get("criticals", [])
         if criticals:

@@ -95,6 +95,7 @@ async def handle_doctor_voice_note(
             "follow_up_days": follow_up_days,
             # Stored for REGEN support — allows re-running pipeline without re-transcribing audio
             "transcript": result.get("transcript", ""),
+            "soap_note": result.get("soap_note") or {},
             "clinical_entities": result.get("clinical_entities") or {},
             "fhir_bundle": result.get("fhir_bundle") or {},
             "snomed_mappings": result.get("snomed_mappings") or [],
@@ -187,15 +188,31 @@ def store_scribe_pdf(pdf_path: str) -> tuple[str, str]:
     document_id = str(uuid.uuid4())
     target = GENERATED_DIR / f"{document_id}.pdf"
     shutil.copyfile(pdf_path, target)
-    _pdf_store[document_id] = str(target)
-    return document_id, str(target)
+    stored_path = str(target)
+    _pdf_store[document_id] = stored_path
+    # Register in Redis so other workers can serve this PDF
+    try:
+        from app.services.store import register_pdf
+        register_pdf("scribe", document_id, stored_path)
+    except Exception:
+        pass
+    return document_id, stored_path
 
 
 def get_scribe_pdf_path(document_id: str) -> str | None:
+    # 1. In-process cache (fastest, same worker)
     stored = _pdf_store.get(document_id)
     if stored and os.path.exists(stored):
         return stored
-
+    # 2. Cross-worker Redis registry
+    try:
+        from app.services.store import lookup_pdf
+        redis_path = lookup_pdf("scribe", document_id)
+        if redis_path and os.path.exists(redis_path):
+            return redis_path
+    except Exception:
+        pass
+    # 3. Filesystem fallback (shared volume)
     target = GENERATED_DIR / f"{document_id}.pdf"
     if target.exists():
         return str(target)
@@ -323,9 +340,18 @@ def _try_buffer_doctor_audio(media_url: str, doctor_number: str) -> str | None:
         r = _redis_lib.Redis.from_url(r_url, decode_responses=True, socket_connect_timeout=2)
         r.ping()
 
+        import re as _re
+        _UUID_RE = _re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:",
+            _re.I,
+        )
         prefix = "clinicai:consult:"
         for key in r.scan_iter(f"{prefix}*"):
             patient_number = key.removeprefix(prefix)
+            # Skip clinic-scoped keys (format: "clinic_id:phone"); the same
+            # session is always accessible via the legacy "phone-only" key.
+            if _UUID_RE.match(patient_number):
+                continue
             session = get_consultation(patient_number)
             if not session or not session.is_active:
                 continue

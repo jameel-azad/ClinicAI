@@ -26,3 +26,16 @@ Parser/tests/
 generated/
 
 .claude/
+.gemini/
+
+# ========================
+# Node
+# ========================
+node_modules/
+
+# ========================
+# Next.js
+# ========================
+.next/
+out/
+build/

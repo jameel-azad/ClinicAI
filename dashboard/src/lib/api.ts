@@ -52,6 +52,7 @@ export interface Doctor {
   working_hours_end: number;
   appointment_duration: number;
   buffer_minutes: number;
+  google_calendar_id?: string | null;
 }
 
 export interface ModelConfig {

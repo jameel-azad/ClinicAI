@@ -1,18 +1,3 @@
-"""
-Doctor directory service — multi-doctor hospital support.
-
-Responsibilities:
-- Match doctors to patient symptoms via specialty keywords (no LLM)
-- Format a numbered doctor list for WhatsApp
-- Resolve a patient's selection (number / name / specialty) back to a doctor name
-- Seed demo doctors for development
-
-The identity/auth system (DOCTOR_WHATSAPP_NUMBERS) is separate. This module
-only reads doctor *profiles* from the store. A doctor can appear in the
-directory without being in the env var (display-only), but must be in the env
-var to receive WhatsApp approval messages.
-"""
-
 import logging
 import re
 
@@ -246,6 +231,7 @@ def sync_doctors_to_store(doctors: list) -> None:
             "buffer_minutes": doc.buffer_minutes,
             "doctor_number": doc.whatsapp_number,
             "clinic_id": doc.clinic_id,
+            "google_calendar_id": getattr(doc, "google_calendar_id", None) or None,
         })
     logger.info(f"[doctor_directory] Synced {len(doctors)} doctor(s) from DB to store")
 

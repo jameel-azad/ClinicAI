@@ -14,6 +14,7 @@ from app.services.identity import find_doctor_number, normalize_whatsapp_number
 from app.services.scheduler import schedule_reminder
 from app.services.store import (
     all_appointments,
+    find_doctor_profile_by_name,
     get_latest_approval_for_patient,
     get_pending_approval,
     get_slot_suggestions,
@@ -58,26 +59,34 @@ def send_approval_request_sync(
     time_str: str,
     symptoms: str,
 ) -> bool:
+    import logging
+    logger = logging.getLogger(__name__)
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
+        result = asyncio.run(
+            send_approval_request_to_doctor(
+                doctor_number, approval_id, patient_name, date_str, time_str, symptoms
+            )
+        )
+        if not result:
+            logger.error("[approval] Twilio rejected message to doctor %s for approval %s", doctor_number, approval_id)
+        return result
+    except RuntimeError:
+        # asyncio.run() fails if there's already a running event loop in this thread
+        import concurrent.futures
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(
                     asyncio.run,
                     send_approval_request_to_doctor(
                         doctor_number, approval_id, patient_name, date_str, time_str, symptoms
                     ),
                 )
-                return future.result(timeout=15)
-        return loop.run_until_complete(
-            send_approval_request_to_doctor(
-                doctor_number, approval_id, patient_name, date_str, time_str, symptoms
-            )
-        )
+                return future.result(timeout=20)
+        except Exception as exc:
+            logger.error("[approval] send failed (thread fallback): %s", exc)
+            return False
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).error("[approval] send failed: %s", exc)
+        logger.error("[approval] send failed: %s", exc)
         return False
 
 
@@ -132,7 +141,8 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
     }
     save_pending_approval(approval)
 
-    send_approval_request_sync(
+    print(f"[Approval] Sending request {approval_id} to doctor {doctor_number}")
+    sent = send_approval_request_sync(
         doctor_number,
         approval_id,
         session.patient_name or patient_number,
@@ -140,6 +150,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         session.requested_time,
         _format_symptoms(session.symptoms),
     )
+    print(f"[Approval] Message sent={sent} to doctor {doctor_number}")
 
     return (
         f"Thanks. {availability_reason} I have sent this appointment request "
@@ -265,7 +276,9 @@ def is_slot_available(
 ) -> tuple[bool, str]:
     if calendar_enabled():
         try:
-            return check_google_availability(date_str, time_str)
+            profile = find_doctor_profile_by_name(doctor_name) or {}
+            cal_id = profile.get("google_calendar_id") or None
+            return check_google_availability(date_str, time_str, calendar_id=cal_id)
         except Exception as exc:
             print(f"[WARN] Google Calendar check failed, falling back to local: {exc}")
             # Fall through to local calendar check below
@@ -296,7 +309,9 @@ def suggest_alternative_slots(
     time_str: str | None,
 ) -> list[dict]:
     if calendar_enabled():
-        suggestions = suggest_google_slots(date_str, time_str)
+        profile = find_doctor_profile_by_name(doctor_name) or {}
+        cal_id = profile.get("google_calendar_id") or None
+        suggestions = suggest_google_slots(date_str, time_str, calendar_id=cal_id)
         save_slot_suggestions(patient_number, suggestions)
         return suggestions
 
@@ -347,7 +362,9 @@ def _approve(approval: dict) -> str:
                 print(f"[WARN] Could not persist patient on approval: {_pe}")
         except Exception as _pe:
             print(f"[WARN] Could not persist patient on approval: {_pe}")
-    google_event_id = create_google_calendar_event(approval)
+    profile = find_doctor_profile_by_name(approval.get("doctor_name", "")) or {}
+    cal_id = profile.get("google_calendar_id") or None
+    google_event_id = create_google_calendar_event(approval, calendar_id=cal_id)
     update_pending_approval(
         appointment_id,
         status="approved",

@@ -273,7 +273,7 @@ def _forward_report_to_doctor(
     doctor_numbers: list[str] | None = None,
 ) -> None:
     """Send the text summary and (if available) the original PDF to the relevant doctor(s)."""
-    from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_media_sync
+    from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_document_sync
 
     if doctor_numbers is None:
         doctor_numbers = _find_doctor_for_patient(from_number)
@@ -322,9 +322,10 @@ def _forward_report_to_doctor(
     for number in doctor_numbers:
         send_whatsapp_message_sync(number, message)
         if pdf_url:
-            send_whatsapp_media_sync(
+            send_whatsapp_document_sync(
                 number,
-                f"Original lab report — {patient_name}",
                 pdf_url,
+                "lab_report.pdf",
+                f"Original lab report — {patient_name}",
             )
         print(f"[Parser] Report forwarded to doctor {number}")

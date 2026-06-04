@@ -12,6 +12,7 @@ export interface Doctor {
   id: string; clinic_id: string; name: string; specialty: string
   whatsapp_number: string; working_hours_start: number; working_hours_end: number
   appointment_duration_minutes: number; buffer_minutes: number; is_active: boolean
+  google_calendar_id?: string | null
 }
 export interface ModelConfig {
   id: string; clinic_id: string; llm_vendor: string; llm_model: string

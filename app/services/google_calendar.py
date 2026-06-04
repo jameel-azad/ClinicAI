@@ -61,22 +61,22 @@ def calendar_setup_status() -> tuple[bool, str]:
     return True, "Google Calendar is configured."
 
 
-def check_google_availability(date_str: str | None, time_str: str | None) -> tuple[bool, str]:
+def check_google_availability(date_str: str | None, time_str: str | None, calendar_id: str | None = None) -> tuple[bool, str]:
     ready, reason = calendar_setup_status()
     if not ready:
         return False, reason
 
     start, end = _appointment_window(date_str, time_str)
     service = _service()
-    calendar_id = _calendar_id()
+    cal_id = calendar_id or _calendar_id()
     body = {
         "timeMin": start.isoformat(),
         "timeMax": end.isoformat(),
         "timeZone": _timezone_name(),
-        "items": [{"id": calendar_id}],
+        "items": [{"id": cal_id}],
     }
     result = service.freebusy().query(body=body).execute()
-    busy = result.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+    busy = result.get("calendars", {}).get(cal_id, {}).get("busy", [])
 
     if busy:
         return False, "Google Calendar shows this slot is busy."
@@ -88,6 +88,7 @@ def suggest_google_slots(
     time_str: str | None,
     count: int = 3,
     interval_minutes: int | None = None,
+    calendar_id: str | None = None,
 ) -> list[dict]:
     ready, _ = calendar_setup_status()
     if not ready:
@@ -106,7 +107,7 @@ def suggest_google_slots(
     slots = []
     for candidate in candidates:
         candidate_time = _format_time(candidate)
-        available, _ = check_google_availability(date_str, candidate_time)
+        available, _ = check_google_availability(date_str, candidate_time, calendar_id=calendar_id)
         if available:
             slots.append(
                 {
@@ -121,7 +122,7 @@ def suggest_google_slots(
     return slots
 
 
-def create_google_calendar_event(approval: dict) -> str | None:
+def create_google_calendar_event(approval: dict, calendar_id: str | None = None) -> str | None:
     ready, reason = calendar_setup_status()
     if not ready:
         print(f"[Google Calendar] Skipped event creation: {reason}")
@@ -129,7 +130,7 @@ def create_google_calendar_event(approval: dict) -> str | None:
 
     start, end = _appointment_window(approval.get("date_str"), approval.get("time_str"))
     service = _service()
-    calendar_id = _calendar_id()
+    cal_id = calendar_id or _calendar_id()
     patient_name = approval.get("patient_name") or approval.get("patient_number") or "Patient"
     doctor_name = approval.get("doctor_name") or "Doctor"
     clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
@@ -145,7 +146,7 @@ def create_google_calendar_event(approval: dict) -> str | None:
         "start": {"dateTime": start.isoformat(), "timeZone": _timezone_name()},
         "end": {"dateTime": end.isoformat(), "timeZone": _timezone_name()},
     }
-    created = service.events().insert(calendarId=calendar_id, body=event).execute()
+    created = service.events().insert(calendarId=cal_id, body=event).execute()
     return created.get("id")
 
 

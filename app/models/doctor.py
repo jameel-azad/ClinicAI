@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
@@ -26,6 +27,7 @@ class Doctor(Base):
     working_hours_end: Mapped[int] = mapped_column(Integer, default=18, nullable=False)
     appointment_duration_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     buffer_minutes: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    google_calendar_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

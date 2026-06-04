@@ -13,7 +13,8 @@ from app.graph.scribe.nodes import overall_soap_confidence, low_confidence_secti
 from app.graph.scribe.pipeline import scribe_pipeline
 from app.graph.scribe.state import ScribeState
 from app.services.store import all_appointments
-from app.services.whatsapp import download_media_bytes, send_whatsapp_media_sync, send_whatsapp_message_sync
+from app.services.whatsapp import download_media_bytes, send_whatsapp_document_sync, send_whatsapp_message_sync
+
 
 load_dotenv()
 
@@ -36,7 +37,7 @@ _pdf_store: dict[str, str] = {}
 
 
 async def handle_doctor_voice_note(
-    media_id: str,
+    media_url: str,
     media_content_type: str | None,
     doctor_number: str,
     doctor_name: str | None = None,
@@ -46,18 +47,15 @@ async def handle_doctor_voice_note(
         return "I received media from the doctor, but it was not a supported audio voice note."
 
     # ── Consultation buffer pre-check ──────────────────────────────────────────
-    # If an active consultation exists for any patient linked to this doctor,
-    # buffer the audio media_id in the consultation session instead of running the
-    # local scribe pipeline immediately. Jameel's API receives it on finalize.
-    buffered_reply = _try_buffer_doctor_audio(media_id, doctor_number)
+    buffered_reply = _try_buffer_doctor_audio(media_url, doctor_number)
     if buffered_reply:
         return buffered_reply
     # ── End consultation buffer pre-check ──────────────────────────────────────
 
     audio_path = None
     try:
-        print(f"[Scribe] Downloading audio via Meta API...")
-        audio_path = await _download_audio(media_id, media_content_type)
+        print(f"[Scribe] Downloading audio via Twilio...")
+        audio_path = await _download_audio(media_url, media_content_type)
         print(f"[Scribe] Audio saved to {audio_path}, running scribe pipeline...")
         result = await asyncio.to_thread(
             _run_scribe_pipeline,
@@ -118,26 +116,8 @@ async def handle_doctor_voice_note(
         public_url = _public_pdf_url(document_id)
         soap_content_sid = os.getenv("SOAP_APPROVAL_CONTENT_SID", "").strip()
 
-        if soap_content_sid:
-            # ── Button flow ──────────────────────────────────────────────────────
-            # 1. Send the PDF so the doctor can read it
-            if public_url:
-                pdf_caption = (
-                    f"📋 Prescription note for {patient_name or 'patient'} — review before approving."
-                    f"{confidence_notice}"
-                )
-                send_whatsapp_media_sync(doctor_number, pdf_caption, public_url)
-
-            # 2. Send the approval buttons via Content Template
-            from app.services.whatsapp import send_whatsapp_template_sync
-            send_whatsapp_template_sync(
-                doctor_number,
-                soap_content_sid,
-                {
-                    "1": patient_name or "unknown patient",
-                    "2": patient_number or "not identified — include number when approving",
-                },
-            )
+        if False:
+            pass  # Template flow removed — Twilio uses text fallback below
         else:
             # ── Text fallback (no template configured) ───────────────────────────
             fhir_summary = _format_fhir_whatsapp_summary(
@@ -166,7 +146,7 @@ async def handle_doctor_voice_note(
                     f"{confidence_notice}"
                 )
             if public_url:
-                send_whatsapp_media_sync(doctor_number, approval_msg, public_url)
+                send_whatsapp_document_sync(doctor_number, public_url, "prescription.pdf", approval_msg)
             else:
                 send_whatsapp_message_sync(
                     doctor_number,
@@ -218,11 +198,11 @@ def get_scribe_pdf_path(document_id: str) -> str | None:
     return None
 
 
-async def _download_audio(media_id: str, media_content_type: str | None) -> str:
+async def _download_audio(media_url: str, media_content_type: str | None) -> str:
     suffix = SUPPORTED_AUDIO_CONTENT_TYPES.get((media_content_type or "").lower(), ".ogg")
-    audio_bytes = await download_media_bytes(media_id)
+    audio_bytes = await download_media_bytes(media_url)
     if audio_bytes is None:
-        raise RuntimeError(f"Failed to download audio for media_id={media_id}")
+        raise RuntimeError(f"Failed to download audio from {media_url}")
     fd, temp_path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as f:
         f.write(audio_bytes)
@@ -315,10 +295,10 @@ def _public_pdf_url(document_id: str) -> str | None:
     return f"{base_url}/scribe/pdf/{document_id}"
 
 
-def _try_buffer_doctor_audio(media_id: str, doctor_number: str) -> str | None:
+def _try_buffer_doctor_audio(media_url: str, doctor_number: str) -> str | None:
     """
     If any patient has an active ConsultationSession linked to this doctor,
-    buffer the audio media_id there and return an ack string.
+    buffer the audio URL there and return an ack string.
     Returns None if no active consultation — caller should run local scribe.
     """
     try:
@@ -355,11 +335,11 @@ def _try_buffer_doctor_audio(media_id: str, doctor_number: str) -> str | None:
             now = _dt.now(_ZI(_os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata")))
             msg = ConsultationMessage(
                 sender_role="doctor",
-                audio_url=media_id,
+                audio_url=media_url,
                 timestamp=now,
             )
             session.messages.append(msg)
-            session.audio_files.append({"url": media_id, "duration_secs": None})
+            session.audio_files.append({"url": media_url, "duration_secs": None})
             save_consultation(patient_number, session)
 
             print(f"[Scribe] Buffered doctor audio in consultation {session.consultation_id}")

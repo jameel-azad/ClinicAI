@@ -879,7 +879,20 @@ def pdf_output_node(state: ScribeState) -> dict:
     clinic_name = state.get("clinic_name", "")
     snomed_mappings = state.get("snomed_mappings") or []
     fhir_bundle = state.get("fhir_bundle") or {}
+    clinical_entities = state.get("clinical_entities") or {}
     errors = list(state.get("errors", []))
+
+    # Pull doctor profile from store if doctor_name is known
+    doctor_profile: dict = {}
+    try:
+        from app.services.store import find_doctor_profile_by_name
+        raw_name = state.get("doctor_name") or soap_note.get("doctor_name", "")
+        if raw_name:
+            profile = find_doctor_profile_by_name(raw_name)
+            if profile:
+                doctor_profile = profile
+    except Exception:
+        pass
 
     try:
         # Write to a temp file in the system temp dir
@@ -898,6 +911,8 @@ def pdf_output_node(state: ScribeState) -> dict:
             clinic_name=clinic_name,
             snomed_mappings=snomed_mappings,
             fhir_bundle=fhir_bundle,
+            doctor_profile=doctor_profile,
+            clinical_entities=clinical_entities,
         )
 
         logger.info(f"[pdf] Generated SOAP PDF: {pdf_path}")

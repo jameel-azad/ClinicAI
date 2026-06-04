@@ -64,6 +64,7 @@ class DoctorResponse(BaseModel):
     working_hours_end: int
     appointment_duration_minutes: int
     buffer_minutes: int
+    google_calendar_id: Optional[str] = None
     is_active: bool
     created_at: datetime
 
@@ -78,6 +79,7 @@ class DoctorCreateRequest(BaseModel):
     working_hours_end: int = Field(18, ge=0, le=23)
     appointment_duration_minutes: int = Field(30, ge=5, le=480)
     buffer_minutes: int = Field(5, ge=0, le=60)
+    google_calendar_id: Optional[str] = Field(None, max_length=255)
 
 
 class DoctorUpdateRequest(BaseModel):
@@ -88,6 +90,7 @@ class DoctorUpdateRequest(BaseModel):
     working_hours_end: Optional[int] = Field(None, ge=0, le=23)
     appointment_duration_minutes: Optional[int] = Field(None, ge=5, le=480)
     buffer_minutes: Optional[int] = Field(None, ge=0, le=60)
+    google_calendar_id: Optional[str] = Field(None, max_length=255)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,7 @@ async def create_doctor(
         working_hours_end=body.working_hours_end,
         appointment_duration_minutes=body.appointment_duration_minutes,
         buffer_minutes=body.buffer_minutes,
+        google_calendar_id=body.google_calendar_id,
     )
     db.add(doctor)
     try:
@@ -229,6 +233,8 @@ async def update_doctor(
         doctor.appointment_duration_minutes = body.appointment_duration_minutes
     if body.buffer_minutes is not None:
         doctor.buffer_minutes = body.buffer_minutes
+    if body.google_calendar_id is not None:
+        doctor.google_calendar_id = body.google_calendar_id
 
     try:
         await db.commit()

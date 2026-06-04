@@ -88,6 +88,7 @@ const doctorSchema = z
     working_hours_end: z.coerce.number().min(6).max(22),
     appointment_duration: z.coerce.number(),
     buffer_minutes: z.coerce.number(),
+    google_calendar_id: z.string().email("Must be a valid email").or(z.literal("")).optional(),
   })
   .refine((d) => d.working_hours_end > d.working_hours_start, {
     message: "End hour must be after start hour",
@@ -125,6 +126,12 @@ function DoctorCard({ doctor }: { doctor: Doctor }) {
               ? `${doctor.buffer_minutes} min`
               : "None"}
           </dd>
+          {doctor.google_calendar_id && (
+            <>
+              <dt>Calendar</dt>
+              <dd className="truncate text-foreground">{doctor.google_calendar_id}</dd>
+            </>
+          )}
         </dl>
       </CardContent>
     </Card>
@@ -156,6 +163,7 @@ function AddDoctorDialog({
       working_hours_end: 17,
       appointment_duration: 30,
       buffer_minutes: 5,
+      google_calendar_id: "",
     },
   });
 
@@ -242,6 +250,23 @@ function AddDoctorDialog({
               <p className="text-xs text-destructive">
                 {errors.whatsapp_number.message}
               </p>
+            )}
+          </div>
+
+          {/* Google Calendar Email */}
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="doctor-calendar">Google Calendar Email <span className="text-muted-foreground font-normal text-xs">(optional)</span></Label>
+            <Input
+              id="doctor-calendar"
+              type="email"
+              placeholder="doctor@gmail.com"
+              {...register("google_calendar_id")}
+            />
+            <p className="text-xs text-muted-foreground">
+              Doctor's Gmail for per-doctor calendar. They'll need to share their calendar with your clinic's Google account.
+            </p>
+            {errors.google_calendar_id && (
+              <p className="text-xs text-destructive">{errors.google_calendar_id.message}</p>
             )}
           </div>
 

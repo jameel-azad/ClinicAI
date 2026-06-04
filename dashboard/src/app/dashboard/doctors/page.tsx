@@ -5,7 +5,7 @@ import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { useForm, Controller, type Resolver } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
-import { Plus, Pencil, UserX, Users } from "lucide-react"
+import { Plus, Pencil, UserX, Users, Info } from "lucide-react"
 
 import api from "../../../../lib/api"
 import { useMe, useDoctors } from "../../../../lib/hooks"
@@ -104,6 +104,7 @@ const doctorSchema = z.object({
     .int()
     .min(5, "Minimum 5 minutes"),
   buffer_minutes: z.coerce.number().int().min(0),
+  google_calendar_id: z.string().email("Must be a valid email").or(z.literal("")).optional(),
 })
 
 type DoctorFormData = z.infer<typeof doctorSchema>
@@ -181,6 +182,16 @@ function DoctorForm({
         <p className="text-xs text-muted-foreground">Format: whatsapp:+[country code][number]</p>
         {errors.whatsapp_number && (
           <p className="text-xs text-destructive">{errors.whatsapp_number.message}</p>
+        )}
+      </div>
+
+      {/* Google Calendar Email */}
+      <div className="grid gap-1.5">
+        <Label htmlFor="google_calendar_id">Google Calendar Email <span className="text-muted-foreground font-normal">(optional)</span></Label>
+        <Input id="google_calendar_id" type="email" placeholder="doctor@gmail.com" {...register("google_calendar_id")} />
+        <p className="text-xs text-muted-foreground">Doctor's Gmail used for per-doctor calendar integration.</p>
+        {errors.google_calendar_id && (
+          <p className="text-xs text-destructive">{errors.google_calendar_id.message}</p>
         )}
       </div>
 
@@ -295,33 +306,46 @@ function DoctorForm({
 
 function AddDoctorDialog({ clinicId }: { clinicId: string }) {
   const [open, setOpen] = React.useState(false)
+  const [calendarEmail, setCalendarEmail] = React.useState<string | null>(null)
   const queryClient = useQueryClient()
 
   const addMutation = useMutation({
     mutationFn: (data: DoctorFormData) =>
       api.post(`/api/clinics/${clinicId}/doctors`, data).then((r) => r.data),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["doctors", clinicId] })
+      setCalendarEmail(variables.google_calendar_id || null)
       setOpen(false)
     },
   })
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button size="sm"><Plus className="size-4" />Add Doctor</Button>} />
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Add Doctor</DialogTitle>
-          <DialogDescription>
-            Enter the doctor's details below.
-          </DialogDescription>
-        </DialogHeader>
-        <DoctorForm
-          onSubmit={(data) => addMutation.mutate(data)}
-          isPending={addMutation.isPending}
-        />
-      </DialogContent>
-    </Dialog>
+    <>
+      {calendarEmail && (
+        <div className="flex items-start gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200">
+          <Info className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            Ask the doctor to share their Google Calendar with your clinic's Google account and grant <strong>"Make changes to events"</strong> permission. Until they do, appointments will go to the clinic's default calendar.
+          </span>
+          <button onClick={() => setCalendarEmail(null)} className="ml-auto shrink-0 opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger render={<Button size="sm"><Plus className="size-4" />Add Doctor</Button>} />
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Doctor</DialogTitle>
+            <DialogDescription>
+              Enter the doctor's details below.
+            </DialogDescription>
+          </DialogHeader>
+          <DoctorForm
+            onSubmit={(data) => addMutation.mutate(data)}
+            isPending={addMutation.isPending}
+          />
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
@@ -365,6 +389,7 @@ function EditDoctorDialog({
             working_hours_end: doctor.working_hours_end,
             appointment_duration_minutes: doctor.appointment_duration_minutes,
             buffer_minutes: doctor.buffer_minutes,
+            google_calendar_id: doctor.google_calendar_id ?? "",
           }}
           onSubmit={(data) => editMutation.mutate(data)}
           isPending={editMutation.isPending}

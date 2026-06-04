@@ -8,44 +8,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-_BASE = f"https://graph.facebook.com/{os.getenv('META_API_VERSION', 'v21.0')}"
 
 
-def _headers() -> dict:
-    return {
-        "Authorization": f"Bearer {os.getenv('META_ACCESS_TOKEN', '')}",
-        "Content-Type": "application/json",
-    }
+def _creds() -> tuple[str, str, str]:
+    return (
+        os.getenv("TWILIO_ACCOUNT_SID", ""),
+        os.getenv("TWILIO_AUTH_TOKEN", ""),
+        os.getenv("TWILIO_WHATSAPP_FROM", ""),
+    )
 
 
-def _phone_number_id() -> str:
-    return os.getenv("META_PHONE_NUMBER_ID", "")
+def _twilio_to(num: str) -> str:
+    n = num.strip()
+    return n if n.startswith("whatsapp:") else f"whatsapp:{n}"
 
 
-def _clean_number(num: str) -> str:
-    return num.replace("whatsapp:", "").strip()
+def _messages_url() -> str:
+    sid, _, _ = _creds()
+    return f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
 
 
 async def send_whatsapp_message_async(to: str, body: str) -> bool:
-    url = f"{_BASE}/{_phone_number_id()}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": _clean_number(to),
-        "type": "text",
-        "text": {"body": body},
-    }
+    sid, token, from_num = _creds()
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=_headers(), timeout=30)
+        async with httpx.AsyncClient(auth=(sid, token)) as client:
+            response = await client.post(
+                _messages_url(),
+                data={"From": from_num, "To": _twilio_to(to), "Body": body},
+                timeout=30,
+            )
         response.raise_for_status()
-        logger.info("WhatsApp message sent to %s", _clean_number(to))
+        logger.info("WhatsApp message sent to %s", to)
         return True
     except httpx.HTTPStatusError as exc:
-        logger.error(
-            "WhatsApp message failed (HTTP %s): %s",
-            exc.response.status_code,
-            exc.response.text,
-        )
+        logger.error("WhatsApp message failed (HTTP %s): %s", exc.response.status_code, exc.response.text)
         return False
     except Exception as exc:
         logger.error("WhatsApp message failed: %s", exc)
@@ -54,47 +50,34 @@ async def send_whatsapp_message_async(to: str, body: str) -> bool:
 
 def send_whatsapp_message_sync(to: str, body: str) -> bool:
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, send_whatsapp_message_async(to, body))
-                return future.result()
-        else:
-            return loop.run_until_complete(send_whatsapp_message_async(to, body))
-    except RuntimeError:
         return asyncio.run(send_whatsapp_message_async(to, body))
+    except RuntimeError:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, send_whatsapp_message_async(to, body)).result(timeout=20)
 
 
 async def send_whatsapp_document_async(
     to: str, document_url: str, filename: str, caption: str = ""
 ) -> bool:
-    url = f"{_BASE}/{_phone_number_id()}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": _clean_number(to),
-        "type": "document",
-        "document": {
-            "link": document_url,
-            "filename": filename,
-            "caption": caption,
-        },
-    }
+    sid, token, from_num = _creds()
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=_headers(), timeout=30)
+        async with httpx.AsyncClient(auth=(sid, token)) as client:
+            response = await client.post(
+                _messages_url(),
+                data={
+                    "From": from_num,
+                    "To": _twilio_to(to),
+                    "Body": caption or filename,
+                    "MediaUrl": document_url,
+                },
+                timeout=30,
+            )
         response.raise_for_status()
-        logger.info(
-            "WhatsApp document sent to %s (file: %s)", _clean_number(to), filename
-        )
+        logger.info("WhatsApp document sent to %s (%s)", to, filename)
         return True
     except httpx.HTTPStatusError as exc:
-        logger.error(
-            "WhatsApp document failed (HTTP %s): %s",
-            exc.response.status_code,
-            exc.response.text,
-        )
+        logger.error("WhatsApp document failed (HTTP %s): %s", exc.response.status_code, exc.response.text)
         return False
     except Exception as exc:
         logger.error("WhatsApp document failed: %s", exc)
@@ -105,113 +88,34 @@ def send_whatsapp_document_sync(
     to: str, document_url: str, filename: str, caption: str = ""
 ) -> bool:
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(
-                    asyncio.run,
-                    send_whatsapp_document_async(to, document_url, filename, caption),
-                )
-                return future.result()
-        else:
-            return loop.run_until_complete(
-                send_whatsapp_document_async(to, document_url, filename, caption)
-            )
+        return asyncio.run(send_whatsapp_document_async(to, document_url, filename, caption))
     except RuntimeError:
-        return asyncio.run(
-            send_whatsapp_document_async(to, document_url, filename, caption)
-        )
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run,
+                send_whatsapp_document_async(to, document_url, filename, caption),
+            ).result(timeout=20)
 
 
 async def send_whatsapp_interactive_buttons(
     to: str, body_text: str, buttons: list[dict]
 ) -> bool:
-    url = f"{_BASE}/{_phone_number_id()}/messages"
-    capped_buttons = buttons[:3]
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": _clean_number(to),
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": body_text},
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {"id": b["id"], "title": b["title"]},
-                    }
-                    for b in capped_buttons
-                ]
-            },
-        },
-    }
+    # Twilio sandbox doesn't support Meta-style interactive buttons — send as plain text
+    options = "\n".join(f"• {b['title']}" for b in buttons[:3])
+    return await send_whatsapp_message_async(to, f"{body_text}\n\n{options}")
+
+
+async def download_media_bytes(url: str) -> bytes | None:
+    """Download media from a Twilio MediaUrl (Basic Auth required)."""
+    sid, token, _ = _creds()
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=_headers(), timeout=30)
-        response.raise_for_status()
-        logger.info(
-            "WhatsApp interactive buttons sent to %s (%d buttons)",
-            _clean_number(to),
-            len(capped_buttons),
-        )
-        return True
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "WhatsApp interactive buttons failed (HTTP %s): %s",
-            exc.response.status_code,
-            exc.response.text,
-        )
-        return False
-    except Exception as exc:
-        logger.error("WhatsApp interactive buttons failed: %s", exc)
-        return False
-
-
-async def get_media_download_url(media_id: str) -> str | None:
-    url = f"{_BASE}/{media_id}"
-    auth_headers = {"Authorization": f"Bearer {os.getenv('META_ACCESS_TOKEN', '')}"}
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=auth_headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        media_url = data.get("url")
-        if not media_url:
-            logger.error("No 'url' field in media metadata response: %s", data)
-            return None
-        return media_url
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "get_media_download_url failed (HTTP %s): %s",
-            exc.response.status_code,
-            exc.response.text,
-        )
-        return None
-    except Exception as exc:
-        logger.error("get_media_download_url failed: %s", exc)
-        return None
-
-
-async def download_media_bytes(media_id: str) -> bytes | None:
-    media_url = await get_media_download_url(media_id)
-    if not media_url:
-        return None
-
-    auth_headers = {"Authorization": f"Bearer {os.getenv('META_ACCESS_TOKEN', '')}"}
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(media_url, headers=auth_headers, timeout=60)
+        async with httpx.AsyncClient(auth=(sid, token)) as client:
+            response = await client.get(url, timeout=60, follow_redirects=True)
         response.raise_for_status()
         return response.content
     except httpx.HTTPStatusError as exc:
-        logger.error(
-            "download_media_bytes failed (HTTP %s): %s",
-            exc.response.status_code,
-            exc.response.text,
-        )
+        logger.error("download_media_bytes failed (HTTP %s): %s", exc.response.status_code, exc.response.text)
         return None
     except Exception as exc:
         logger.error("download_media_bytes failed: %s", exc)
@@ -219,5 +123,5 @@ async def download_media_bytes(media_id: str) -> bytes | None:
 
 
 def send_whatsapp_message(to: str, body: str) -> bool:
-    """Backward-compatible alias for send_whatsapp_message_sync."""
+    """Backward-compatible alias."""
     return send_whatsapp_message_sync(to, body)

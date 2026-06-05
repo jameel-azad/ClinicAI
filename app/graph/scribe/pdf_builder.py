@@ -1,18 +1,3 @@
-"""
-app/graph/scribe/pdf_builder.py — Hospital-grade OPD prescription PDF.
-
-Layout:
-  - Header: doctor info (left) | clinic name (right)
-  - "Outpatient Summary and Prescription" subtitle
-  - Patient information bar
-  - Clinical sections: Chief Complaints, History, Examination, Diagnosis
-  - Investigations
-  - Medicines table with Morning / Afternoon / Evening / Night columns
-  - Advice
-  - Signature / stamp footer
-  - Audit appendix: grounding report + transcript (new page)
-"""
-
 from __future__ import annotations
 
 import re

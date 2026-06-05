@@ -1,12 +1,3 @@
-"""
-BookingAgent — handles all appointment-related intents:
-  appointment_book, appointment_cancel, appointment_reschedule,
-  appointment_status, general_query (off-topic mid-flow)
-
-Receives already-classified intent + loaded session from RouterAgent.
-No internal intent classification or session loading needed.
-"""
-
 import json
 import os
 import re

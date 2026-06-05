@@ -1,11 +1,3 @@
-"""
-LabAgent — thin wrapper around the existing PDF lab report parser.
-
-Patient PDFs are routed here by the RouterAgent when media type is PDF
-OR when the intent is lab_report_share. The actual parsing is handled
-by the existing app/services/pdf_service.py pipeline.
-"""
-
 import os
 
 from dotenv import load_dotenv

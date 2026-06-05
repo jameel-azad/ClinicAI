@@ -1,25 +1,3 @@
-"""
-ConsultationAgent — the Sprint 2 core feature.
-
-Detects active/new consultations, buffers all messages (doctor + patient)
-with sender_role labels, detects the end of the consultation, and fires
-the Jameel scribe integration.
-
-Consultation starts when:
-  - Patient sends a message classified as consultation_message intent, OR
-  - Patient's journey_state is already CONSULTATION_ACTIVE
-
-Consultation ends when:
-  - The DOCTOR sends a recognised closing phrase ("ok done", "take care", etc.)
-  - APScheduler fires the 30-min inactivity timeout (_consultation_timeout_job)
-
-On end:
-  - consultation_service.finalize_and_send() is called
-  - summary_for_whatsapp sent to doctor within 60s
-  - journey_state = POST_CONSULT
-  - ConsultationSession deleted from Redis
-"""
-
 import os
 import uuid
 from datetime import datetime

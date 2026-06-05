@@ -1,11 +1,3 @@
-"""
-AfterHoursAgent — queues messages received outside clinic hours and sends an ack.
-
-Clinic hours are controlled by CLINIC_OPEN_HOUR / CLINIC_CLOSE_HOUR env vars.
-Queued messages are flushed back into the router at open time by a daily
-APScheduler cron job registered via schedule_afterhours_flush().
-"""
-
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo

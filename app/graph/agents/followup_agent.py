@@ -1,9 +1,3 @@
-"""
-FollowUpAgent — handles:
-  - followup_query / prescription_request intents
-  - Any message from a patient in POST_CONSULT or FOLLOW_UP_PENDING state
-"""
-
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 

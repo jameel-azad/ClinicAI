@@ -1,10 +1,3 @@
-"""
-EmergencyAgent — responds to emergency intent.
-
-Sends "Call 112" to patient AND notifies all configured doctors.
-Clears the patient session so they start fresh afterwards.
-"""
-
 import os
 
 from dotenv import load_dotenv

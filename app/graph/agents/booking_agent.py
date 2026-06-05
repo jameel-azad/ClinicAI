@@ -62,9 +62,9 @@ MSG_ASK_DOCTOR = "Got it — *{date}* at *{time}*. 👍\n\nWhich doctor would yo
 
 MSG_CONFIRM = (
     "Please confirm your appointment:\n\n"
-    "👨‍⚕️ Doctor : *{doctor}*\n"
-    "📅 Date   : *{date}*\n"
-    "🕐 Time   : *{time}*\n\n"
+    "👨‍⚕️ Doctor: *{doctor}*\n"
+    "📅 Date  : *{date}*\n"
+    "🕐 Time  : *{time}*\n\n"
     "Reply *yes* to confirm or *no* to cancel."
 )
 
@@ -106,9 +106,9 @@ MSG_OFF_TOPIC = (
 
 MSG_CANCEL_CONFIRM = (
     "Are you sure you want to cancel your appointment?\n\n"
-    "👨‍⚕️ Doctor : *{doctor}*\n"
-    "📅 Date   : *{date}*\n"
-    "🕐 Time   : *{time}*\n\n"
+    "👨‍⚕️ Doctor: *{doctor}*\n"
+    "📅 Date  : *{date}*\n"
+    "🕐 Time  : *{time}*\n\n"
     "Reply *yes* to cancel or *no* to keep it."
 )
 
@@ -129,15 +129,15 @@ MSG_PENDING_CANCELLED = (
 
 MSG_RESCHEDULE_START = (
     "Sure! Your current appointment:\n\n"
-    "👨‍⚕️ Doctor : *{doctor}*\n"
-    "📅 Date   : *{date}*\n"
-    "🕐 Time   : *{time}*\n\n"
+    "👨‍⚕️ Doctor: *{doctor}*\n"
+    "📅 Date  : *{date}*\n"
+    "🕐 Time  : *{time}*\n\n"
     "What new date and time would you like?\n"
     "_(e.g. '26th May at 4 PM')_"
 )
 
 MSG_RESCHEDULE_CONFIRM = (
-    "Got it! Reschedule to:\n\n"
+    "Got it! Reschedule your appointment with *{doctor}* to:\n\n"
     "📅 Date : *{new_date}*\n"
     "🕐 Time : *{new_time}*\n\n"
     "Reply *yes* to confirm or *no* to keep your current appointment."

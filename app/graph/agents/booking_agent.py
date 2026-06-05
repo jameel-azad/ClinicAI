@@ -89,7 +89,8 @@ MSG_NEED_DATE = (
 MSG_START_BOOKING = (
     "Sure! To book your appointment, I'll need a few details:\n\n"
     "👤 *Patient name*\n"
-    "📅 *Preferred date* (e.g. 28th May)\n"
+    "📋 *Symptoms*\n"
+    "📅 *Preferred date* (e.g. 1st Jan)\n"
     "🕐 *Preferred time* (e.g. 5 PM)\n"
     "👨‍⚕️ *Doctor's name*\n\n"
     "_(You can share all at once or one by one — Hindi or English, both work!)_ 😊"

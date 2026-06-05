@@ -1,16 +1,3 @@
-"""
-app/nodes.py — Individual LangGraph node functions for the lab report pipeline.
-
-Each function takes the current ReportState and returns a dict of updates.
-LangGraph merges these updates into the shared state automatically.
-
-Node order:
-  1. extract_text_node    — PDF → raw text (pdfplumber)
-  2. extract_all_node     — raw text → patient info + test values (single LLM call)
-  3. flag_abnormals_node  — rule-based HIGH/LOW flagging (no LLM)
-  4. generate_summary_node — abnormals → critical classification + summary (single LLM call)
-"""
-
 import json
 import logging
 import re

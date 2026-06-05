@@ -1,10 +1,3 @@
-"""
-app/state.py — Shared state schema for the LangGraph lab report pipeline.
-
-Each node reads from and writes to this TypedDict. LangGraph threads
-the state object through the graph automatically.
-"""
-
 from typing import Optional
 from typing_extensions import TypedDict
 

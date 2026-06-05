@@ -1,12 +1,3 @@
-"""
-app/nodes.py — LangGraph nodes for the Clinical Scribe pipeline.
-
-Node 1: transcribe_node        — Audio file → transcript (Whisper API)
-Node 2: soap_generator_node   — Transcript → SOAP JSON (LLM, few-shot)
-Node 3: grounding_check_node  — Verify every sentence maps to transcript
-Node 4: pdf_output_node       — SOAP JSON + grounding → PDF
-"""
-
 import json
 import logging
 import os
@@ -115,7 +106,7 @@ def transcribe_node(state: ScribeState) -> dict:
 
     try:
         client = _groq_client()
-        model = os.getenv("WHISPER_MODEL", "whisper-large-v3-turbo")
+        model = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 
         with open(audio_path, "rb") as audio_file:
             response = client.audio.transcriptions.create(
@@ -159,8 +150,11 @@ SOAP_SYSTEM = """You are a clinical documentation assistant for Indian doctors. 
 RULES:
 1. NEVER invent clinical details — every fact must be traceable to the transcript.
 2. Insufficient section info → confidence < 0.5 + clarifying_question, never invent content.
-3. Hinglish: 'BP thoda high hai' → 'Blood pressure mildly elevated.'
-4. Abbreviations: OD=once daily, BD=twice daily, TDS=three times daily, SOS=as needed, HTN=hypertension, DM=diabetes mellitus, IHD=ischaemic heart disease.
+3. Hinglish: 'BP thoda high hai' → 'Blood pressure mildly elevated','bukhar' → 'fever', 'sir dard' → 'headache'.
+4. Dosing abbreviations: OD=once daily, BD=twice daily, TDS=three times daily, QID=four times daily, SOS=as needed, HS=at bedtime, AC=before meals, PC=after meals.
+5. Abbreviations: OD=once daily, BD=twice daily, TDS=three times daily, SOS=as needed, HTN=hypertension, DM=diabetes mellitus, IHD=ischaemic heart disease.
+6. Diagnosis abbreviations: HTN=hypertension, DM=diabetes mellitus, IHD=ischaemic heart disease, CKD=chronic kidney disease, COPD=chronic obstructive pulmonary disease, URTI=upper respiratory tract infection, UTI=urinary tract infection.
+7. follow_up_days: Convert to integer days. English: '2 weeks' → 14, '1 month' → 30. Hinglish: 'do hafte baad' → 14, 'ek mahina' → 30, 'teen din' → 3, 'kal aana' → 1. Not mentioned → null.
 
 Return ONLY valid JSON (no markdown, no preamble) matching this schema:
 {
@@ -230,6 +224,8 @@ Expected output:
     "clarifying_question": ""
   }
 }
+
+FINAL REMINDER: Output a single JSON object only. First character must be '{', last must be '}'. No markdown, no explanation, no text outside the JSON.
 """
 
 
@@ -319,18 +315,42 @@ def _empty_soap() -> dict:
 
 GROUNDING_SYSTEM = """You are a medical safety auditor. Your job is to check whether each sentence in a SOAP note is grounded in (supported by) the original transcript.
 
-For each sentence in the SOAP note:
-- Find the transcript segment that supports it (copy the relevant 5-15 words from the transcript)
-- If no transcript segment supports the sentence, mark it as ungrounded
+RULES:
+1. STRICT: If a sentence contains a specific clinical claim (drug name, dosage, diagnosis, \
+vital sign value) not present in the transcript, mark it is_grounded: false.
+
+2. TRANSLATION: The SOAP note translates Hinglish to clinical English — this is expected. \
+A sentence is grounded if its clinical meaning matches the transcript, even if wording differs. \
+'BP thoda high hai' → grounds 'Blood pressure mildly elevated.' \
+'bukhar 3 din se' → grounds 'Fever for 3 days.' \
+'sir dard hai' → grounds 'Patient reports headache.' \
+In transcript_segment, always quote the original phrase from the transcript, not a translation.
+
+3. INFERENCE: Standard clinical inferences from raw data are grounded. \
+'BP 140/90' in transcript → grounds 'Hypertension, stage 1' in assessment. \
+'RBS 280 mg/dL' → grounds 'Uncontrolled diabetes mellitus.' \
+'SpO2 88%' → grounds 'Hypoxaemia.' \
+Cite the raw value as transcript_segment.
+
+4. QUOTE LENGTH: Quote the shortest phrase that supports the claim (5-20 words). \
+Never truncate mid-number or mid-clinical-term.
+
+5. MISSING INFO: If a section was marked is_missing: true in the SOAP note, \
+skip its sentences — do not flag empty content as ungrounded.
+
+For each sentence return:
+- sentence: exact sentence from the SOAP note
+- transcript_segment: supporting phrase from transcript (original language), or '' if none
+- is_grounded: true or false
 
 Return ONLY valid JSON list (no markdown):
+Return ONLY a valid JSON array:
 [
   {
     "sentence": "<exact sentence from SOAP note>",
-    "transcript_segment": "<supporting text from transcript, or empty string if none>",
+    "transcript_segment": "<original transcript phrase or ''>",
     "is_grounded": <true or false>
-  },
-  ...
+  }
 ]
 
 IMPORTANT: Be strict. If a sentence contains a specific clinical claim (drug name, dosage, diagnosis, vital sign) that is not clearly in the transcript, mark it ungrounded even if it seems plausible.

@@ -1,14 +1,3 @@
-"""
-app/pipeline.py — Builds and returns the compiled LangGraph for lab report processing.
-
-The graph is stateful and compiled once at startup (module level).
-Each API call runs a fresh invocation through the compiled graph.
-
-Graph structure (linear pipeline):
-
-  extract_text → extract_all → flag_abnormals → generate_summary → END
-"""
-
 from langgraph.graph import StateGraph, START, END
 
 from app.graph.parser.state import ReportState

@@ -295,10 +295,10 @@ export default function ClinicDetailPage({
                   <div className="flex flex-wrap gap-2">
                     {(
                       [
-                        ["Groq", clinic.model_config.groq_key_set],
-                        ["Anthropic", clinic.model_config.anthropic_key_set],
-                        ["OpenAI", clinic.model_config.openai_key_set],
-                        ["Google", clinic.model_config.google_key_set],
+                        ["Groq", clinic.model_config.groq_api_key_set],
+                        ["Anthropic", clinic.model_config.anthropic_api_key_set],
+                        ["OpenAI", clinic.model_config.openai_api_key_set],
+                        ["Google", clinic.model_config.google_api_key_set],
                       ] as [string, boolean][]
                     ).map(([name, isSet]) => (
                       <Badge

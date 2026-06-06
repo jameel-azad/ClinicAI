@@ -143,6 +143,16 @@ MSG_NO_RESCHEDULE = (
     "Would you like to book one? 😊"
 )
 
+MSG_SYMPTOM_TO_BOOKING = (
+    "I can see you're dealing with some health concerns — our doctors are here to help! 🏥\n\n"
+    "To connect you with a doctor, let me set up an appointment. Could you share:\n\n"
+    "👤 *Patient name*\n"
+    "📅 *Preferred date* (e.g. 15 June)\n"
+    "🕐 *Preferred time* (e.g. 5 PM)\n"
+    "👨‍⚕️ *Doctor's name* (optional)\n\n"
+    "_(Hindi or English, both work!)_ 😊"
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -410,6 +420,16 @@ def flow_node(state: BookingState) -> dict:
             or _has_booking_keywords(state.get("incoming_message", ""))
         )
 
+        # New patient opened with symptoms — bridge to the booking flow
+        if state.get("intent") == "consultation_message" and booking_state == "GREETING":
+            session.state = "COLLECTING_INFO"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": MSG_SYMPTOM_TO_BOOKING,
+                "pipeline_log": ["flow_node: consultation_message from new patient — bridged to booking"],
+            }
+
         # When doctor_name is the only remaining unknown, show the doctor selection list
         if missing == ["doctor_name"] and is_booking:
             from app.services.doctor_directory import (
@@ -429,7 +449,7 @@ def flow_node(state: BookingState) -> dict:
             session.state = "COLLECTING_INFO"
 
         if booking_state == "GREETING" and not is_booking:
-            reply = MSG_GREETING
+            reply = bot_response or MSG_GREETING
         elif booking_state == "GREETING" and is_booking:
             reply = MSG_START_BOOKING
         else:

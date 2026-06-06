@@ -17,11 +17,12 @@ Sub-agents:
   emergency_agent — emergency intent
 """
 
+import logging
+import os
 from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 
 from app.schemas import BookingSession, BookingState
@@ -35,6 +36,27 @@ from app.graph.agents.followup_agent import followup_agent_graph
 from app.graph.agents.lab_agent import lab_agent_graph
 
 load_dotenv()
+
+_log = logging.getLogger(__name__)
+
+
+def _build_checkpointer():
+    """Return a Redis checkpointer, falling back to MemorySaver if Redis is unavailable."""
+    try:
+        from langgraph.checkpoint.redis import RedisSaver
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        cp = RedisSaver(redis_url=redis_url)
+        cp.setup()
+        _log.info("[router] LangGraph checkpointer: Redis (%s)", redis_url.split("@")[-1] if "@" in redis_url else redis_url)
+        return cp
+    except Exception as exc:
+        from langgraph.checkpoint.memory import MemorySaver
+        _log.warning(
+            "[router] Redis checkpointer unavailable (%s) — "
+            "falling back to MemorySaver (graph state lost on restart).", exc,
+        )
+        return MemorySaver()
+
 
 EMPTY_ENTITIES = {
     "patient_name": None, "doctor_name": None, "requested_date": None,
@@ -52,7 +74,7 @@ def after_hours_check_node(state: BookingState) -> dict:
     close_hour = state.get("clinic_close_hour") or CLINIC_CLOSE_HOUR
 
     if is_clinic_open(open_hour, close_hour):
-        # Reset any stale reply_message from the MemorySaver checkpoint
+        # Reset any stale reply_message from the checkpoint
         return {"reply_message": "", "pipeline_log": ["router: clinic open — continuing"]}
 
     result = after_hours_agent_graph.invoke({
@@ -124,7 +146,7 @@ def session_node(state: BookingState) -> dict:
 
     clinic_id = state.get("clinic_id")
 
-    # Prefer MemorySaver checkpoint for booking flow state (keeps in-progress
+    # Prefer the graph checkpoint for booking flow state (keeps in-progress
     # bookings intact across messages). But always pull journey_state from Redis
     # because background jobs (scheduler) write there and bypass the checkpoint.
     existing = state.get("session")
@@ -256,7 +278,12 @@ def route_after_session(
     if intent == "emergency":
         return "emergency_dispatch_node"
 
-    if journey_state == "CONSULTATION_ACTIVE" or intent == "consultation_message":
+    # Bug 3: guard consultation routing — new/mid-booking patients describing symptoms
+    # should reach booking_agent, not the consultation agent built for active sessions
+    if journey_state == "CONSULTATION_ACTIVE" or (
+        intent == "consultation_message"
+        and journey_state not in ("NEW_PATIENT", "BOOKING_IN_PROGRESS")
+    ):
         return "consultation_dispatch_node"
 
     if intent == "lab_report_share":
@@ -265,8 +292,13 @@ def route_after_session(
     if intent in ("followup_query", "prescription_request"):
         return "followup_dispatch_node"
 
-    # Any message from a POST_CONSULT or FOLLOW_UP_PENDING patient goes to
-    # followup regardless of what the classifier returned
+    # Bug 2: appointment management intents must reach booking_agent even for
+    # POST_CONSULT / FOLLOW_UP_PENDING patients — explicit intent wins over journey state
+    if intent in ("appointment_cancel", "appointment_reschedule",
+                  "appointment_status", "appointment_book"):
+        return "booking_dispatch_node"
+
+    # Any other message from a POST_CONSULT or FOLLOW_UP_PENDING patient goes to followup
     if journey_state in ("POST_CONSULT", "FOLLOW_UP_PENDING"):
         return "followup_dispatch_node"
 
@@ -277,7 +309,7 @@ def route_after_session(
 # GRAPH ASSEMBLY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_router_graph():
+def build_router_graph(checkpointer=None):
     g = StateGraph(BookingState)
 
     g.add_node("after_hours_check_node", after_hours_check_node)
@@ -314,8 +346,8 @@ def build_router_graph():
     g.add_edge("followup_dispatch_node", END)
     g.add_edge("booking_dispatch_node", END)
 
-    memory = MemorySaver()
-    return g.compile(checkpointer=memory)
+    return g.compile(checkpointer=checkpointer)
 
 
-router_graph = build_router_graph()
+_checkpointer = _build_checkpointer()
+router_graph = build_router_graph(_checkpointer)

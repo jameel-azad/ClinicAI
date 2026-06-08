@@ -75,21 +75,24 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
     follow_up_questions = soap.get("follow_up_questions") or []
     follow_up_days = soap.get("follow_up_days")
 
+    # Always save the record, update session, and schedule follow-up —
+    # regardless of whether the PDF is publicly accessible.
+    _mark_post_consult(patient_number)
+    _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days)
+    _save_consultation_record(soap, patient_number, patient_name, public_url)
+
     if public_url:
         filename = f"consultation_{soap_id}.pdf"
         sent = send_whatsapp_document_sync(patient_number, public_url, filename, caption)
         if sent:
-            _mark_post_consult(patient_number)
-            _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days)
-            _save_consultation_record(soap, patient_number, patient_name, public_url)
             return f"✅ Prescription note approved and sent to {patient_number}."
-        return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please send manually."
+        return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please forward manually."
 
     pdf_path = get_scribe_pdf_path(document_id) if document_id else None
     return (
-        f"✅ Approved, but PUBLIC_BASE_URL is not configured — cannot attach the PDF.\n"
+        f"✅ Approved. PUBLIC_BASE_URL is not configured so the PDF could not be sent automatically.\n"
         f"Please forward manually to {patient_number}.\n"
-        f"PDF: {pdf_path or 'unavailable'}"
+        f"PDF path: {pdf_path or 'unavailable'}"
     )
 
 

@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -35,6 +35,110 @@ MONTHS = {
     "dec": 12,
     "december": 12,
 }
+
+_MONTH_PATTERN = (
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b"
+)
+
+# Weekday name → Python weekday() index (Mon=0 … Sun=6)
+WEEKDAYS = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thurs": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
+
+# Time strings that mean "no specific time — pick a slot for me".
+_VAGUE_TIME_WORDS = {
+    "anytime", "any time", "any", "anytym", "whenever", "flexible",
+    "no preference", "jab bhi", "jabhi", "koi bhi", "koibhi", "kabhi bhi",
+}
+
+# Loose time-of-day windows (start_hour, end_hour) used to narrow slot search.
+_PERIOD_WINDOWS = {
+    "morning": (9, 12), "subah": (9, 12),
+    "afternoon": (12, 16), "dopahar": (12, 16),
+    "evening": (16, 20), "shaam": (16, 20), "sham": (16, 20),
+    "night": (18, 21), "raat": (18, 21),
+}
+
+
+def resolve_date(date_str: str | None, tz: ZoneInfo | None = None) -> date_type | None:
+    """Resolve a free-text date ('tomorrow', 'kal', 'Friday', '7 June') to a date.
+
+    Returns None when nothing date-like can be parsed.
+    """
+    tz = tz or ZoneInfo(_timezone_name())
+    text = (date_str or "").lower().strip()
+    if not text:
+        return None
+
+    today = datetime.now(tz).date()
+
+    if text in {"today", "aaj", "aj"}:
+        return today
+    if text in {"tomorrow", "kal", "tmrw", "tomorow", "tommorow"}:
+        return today + timedelta(days=1)
+    if text in {"day after tomorrow", "day after", "parso", "parson", "parsoon"}:
+        return today + timedelta(days=2)
+
+    for name, weekday in WEEKDAYS.items():
+        if re.search(rf"\b{name}\b", text):
+            days_ahead = (weekday - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7  # "Friday" said on a Friday means next Friday
+            return today + timedelta(days=days_ahead)
+
+    day_m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", text)
+    month_m = re.search(_MONTH_PATTERN, text)
+    if day_m and month_m:
+        year_m = re.search(r"\b(20\d{2})\b", text)
+        year = int(year_m.group(1)) if year_m else today.year
+        try:
+            resolved = date_type(year, MONTHS[month_m.group(1)], int(day_m.group(1)))
+        except ValueError:
+            return None
+        # No explicit year and the date already passed → assume next year.
+        if not year_m and resolved < today:
+            try:
+                resolved = resolved.replace(year=year + 1)
+            except ValueError:
+                pass
+        return resolved
+
+    return None
+
+
+def resolve_date_string(date_str: str | None) -> str | None:
+    """Resolve a free-text date to a concrete display string like '7 June 2026'."""
+    resolved = resolve_date(date_str)
+    if resolved is None:
+        return None
+    return f"{resolved.day} {resolved.strftime('%B %Y')}"
+
+
+def is_vague_time(time_str: str | None) -> bool:
+    """True when the patient gave no usable clock time ('anytime', 'morning', '')."""
+    text = (time_str or "").strip().lower()
+    if not text:
+        return True
+    if text in _VAGUE_TIME_WORDS:
+        return True
+    # No clock digit at all → vague (covers 'morning', 'shaam', 'anytime').
+    return not re.search(r"\d", text)
+
+
+def period_window(time_str: str | None) -> tuple[int, int] | None:
+    """Map a loose time-of-day word to an (start_hour, end_hour) window, if any."""
+    text = (time_str or "").lower()
+    for word, window in _PERIOD_WINDOWS.items():
+        if word in text:
+            return window
+    return None
 
 
 def calendar_enabled() -> bool:
@@ -173,26 +277,17 @@ def _appointment_window(date_str: str | None, time_str: str | None) -> tuple[dat
 
 
 def _parse_appointment_datetime(date_str: str | None, time_str: str | None) -> datetime:
-    date_text = (date_str or "").lower()
-    time_text = (time_str or "").lower()
-    year = int(os.getenv("DEFAULT_APPOINTMENT_YEAR", str(datetime.now().year)))
     timezone = ZoneInfo(_timezone_name())
 
-    day_match = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", date_text)
-    month_match = re.search(
-        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-        r"jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
-        date_text,
-    )
-    if not day_match or not month_match:
+    resolved_date = resolve_date(date_str, timezone)
+    if resolved_date is None:
         raise ValueError(f"Could not parse appointment date: {date_str}")
 
+    time_text = (time_str or "").lower()
     hour_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", time_text)
     if not hour_match:
         raise ValueError(f"Could not parse appointment time: {time_str}")
 
-    day = int(day_match.group(1))
-    month = MONTHS[month_match.group(1)]
     hour = int(hour_match.group(1))
     minute = int(hour_match.group(2) or "0")
     meridiem = hour_match.group(3)
@@ -202,7 +297,10 @@ def _parse_appointment_datetime(date_str: str | None, time_str: str | None) -> d
     if meridiem == "am" and hour == 12:
         hour = 0
 
-    return datetime(year, month, day, hour, minute, tzinfo=timezone)
+    return datetime(
+        resolved_date.year, resolved_date.month, resolved_date.day,
+        hour, minute, tzinfo=timezone,
+    )
 
 
 def _credentials_file() -> Path:

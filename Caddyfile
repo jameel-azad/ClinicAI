@@ -1,0 +1,11 @@
+# Caddy reverse proxy with automatic Let's Encrypt TLS.
+# Hostnames come from the API_HOST / APP_HOST env vars (set in .env, passed by
+# docker-compose). Caddy provisions and renews certs for both automatically.
+
+{$API_HOST} {
+	reverse_proxy api:8000
+}
+
+{$APP_HOST} {
+	reverse_proxy dashboard:3000
+}

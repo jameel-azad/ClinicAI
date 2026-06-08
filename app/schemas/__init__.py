@@ -194,6 +194,7 @@ class BookingState(TypedDict):
     clinic_id: Optional[str]
     clinic_open_hour: int
     clinic_close_hour: int
+    clinic_closed: bool   # set by after_hours_check_node; only defers doctor-facing messages
 
 
 # ── Consultation Models (Sprint 2) ────────────────────────────────────────────

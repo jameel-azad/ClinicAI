@@ -156,7 +156,11 @@ async def finalize_and_send(patient_number: str) -> str:
                 patient_phone=patient_number,
                 patient_name=getattr(booking_session, "patient_name", None) if booking_session else None,
                 doctor_phone=session.doctor_number,
-                chief_complaint=getattr(booking_session, "symptoms", None) if booking_session else None,
+                chief_complaint=(
+                    ", ".join(booking_session.symptoms)
+                    if booking_session and isinstance(getattr(booking_session, "symptoms", None), list)
+                    else getattr(booking_session, "symptoms", None) if booking_session else None
+                ),
                 soap_result=result,
             )
     except Exception as _exc:

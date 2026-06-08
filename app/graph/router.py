@@ -69,27 +69,38 @@ EMPTY_ENTITIES = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def after_hours_check_node(state: BookingState) -> dict:
-    """Pre-check: if clinic is closed, queue message and return ack. Sets reply_message."""
+    """Detect whether the clinic is closed and flag it on the state.
+
+    The AI now stays fully available after hours (booking, FAQ, status, lab,
+    emergency). Only doctor-facing consultation messages are deferred later in
+    route_after_session — see after_hours_dispatch_node.
+    """
     open_hour  = state.get("clinic_open_hour")  or CLINIC_OPEN_HOUR
     close_hour = state.get("clinic_close_hour") or CLINIC_CLOSE_HOUR
-
-    if is_clinic_open(open_hour, close_hour):
+    closed = not is_clinic_open(open_hour, close_hour)
+    return {
+        "clinic_closed": closed,
         # Reset any stale reply_message from the checkpoint
-        return {"reply_message": "", "pipeline_log": ["router: clinic open — continuing"]}
+        "reply_message": "",
+        "pipeline_log": [f"router: clinic {'closed — self-service on' if closed else 'open'}"],
+    }
 
+
+def after_hours_dispatch_node(state: BookingState) -> dict:
+    """Queue a doctor-facing message for the next working day and send the closed ack."""
     result = after_hours_agent_graph.invoke({
         "from_number": state["from_number"],
         "incoming_message": state["incoming_message"],
         "clinic_id": state.get("clinic_id"),
-        "clinic_open_hour": open_hour,
-        "clinic_close_hour": close_hour,
-        "intent": "general_query",
-        "confidence": 0.0,
-        "extracted_entities": EMPTY_ENTITIES.copy(),
+        "clinic_open_hour": state.get("clinic_open_hour") or CLINIC_OPEN_HOUR,
+        "clinic_close_hour": state.get("clinic_close_hour") or CLINIC_CLOSE_HOUR,
+        "intent": state.get("intent", "general_query"),
+        "confidence": state.get("confidence", 0.0),
+        "extracted_entities": state.get("extracted_entities", EMPTY_ENTITIES.copy()),
         "bot_response": None,
-        "session": None,
+        "session": state.get("session"),
         "is_new_session": False,
-        "current_booking_state": "GREETING",
+        "current_booking_state": state.get("current_booking_state", "GREETING"),
         "reply_message": "",
         "appointment_id": None,
         "is_off_topic": False,
@@ -97,7 +108,7 @@ def after_hours_check_node(state: BookingState) -> dict:
     })
     return {
         "reply_message": result.get("reply_message", ""),
-        "pipeline_log": ["router: after-hours — queued and acked"],
+        "pipeline_log": ["router: after-hours — doctor-facing message queued and acked"],
     }
 
 
@@ -255,18 +266,12 @@ def followup_dispatch_node(state: BookingState) -> dict:
 # ROUTING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def route_after_hours(state: BookingState) -> Literal["intent_node", "__end__"]:
-    """If after_hours_check set a reply_message, we're done (after-hours ack sent)."""
-    if state.get("reply_message"):
-        return END
-    return "intent_node"
-
-
 def route_after_session(
     state: BookingState,
 ) -> Literal[
     "emergency_dispatch_node",
     "consultation_dispatch_node",
+    "after_hours_dispatch_node",
     "lab_dispatch_node",
     "followup_dispatch_node",
     "booking_dispatch_node",
@@ -278,12 +283,22 @@ def route_after_session(
     if intent == "emergency":
         return "emergency_dispatch_node"
 
-    # Bug 3: guard consultation routing — new/mid-booking patients describing symptoms
-    # should reach booking_agent, not the consultation agent built for active sessions
-    if journey_state == "CONSULTATION_ACTIVE" or (
+    # Guard consultation routing — only route to consultation_agent for genuinely active
+    # sessions. POST_CONSULT and FOLLOW_UP_PENDING patients asking medical questions
+    # belong in followup_agent (which handles LLM-answer-or-escalate), not a new session.
+    needs_doctor = journey_state == "CONSULTATION_ACTIVE" or (
         intent == "consultation_message"
-        and journey_state not in ("NEW_PATIENT", "BOOKING_IN_PROGRESS")
-    ):
+        and journey_state not in (
+            "NEW_PATIENT", "BOOKING_IN_PROGRESS", "POST_CONSULT", "FOLLOW_UP_PENDING"
+        )
+    )
+
+    # After hours, only doctor-facing consultation messages are deferred & queued.
+    # Everything else (booking, status, lab, FAQ, emergency) stays self-service 24/7.
+    if needs_doctor and state.get("clinic_closed"):
+        return "after_hours_dispatch_node"
+
+    if needs_doctor:
         return "consultation_dispatch_node"
 
     if intent == "lab_report_share":
@@ -320,13 +335,10 @@ def build_router_graph(checkpointer=None):
     g.add_node("emergency_dispatch_node", emergency_dispatch_node)
     g.add_node("lab_dispatch_node", lab_dispatch_node)
     g.add_node("followup_dispatch_node", followup_dispatch_node)
+    g.add_node("after_hours_dispatch_node", after_hours_dispatch_node)
 
     g.add_edge(START, "after_hours_check_node")
-    g.add_conditional_edges(
-        "after_hours_check_node",
-        route_after_hours,
-        {"intent_node": "intent_node", END: END},
-    )
+    g.add_edge("after_hours_check_node", "intent_node")
     g.add_edge("intent_node", "session_node")
     g.add_conditional_edges(
         "session_node",
@@ -334,6 +346,7 @@ def build_router_graph(checkpointer=None):
         {
             "emergency_dispatch_node": "emergency_dispatch_node",
             "consultation_dispatch_node": "consultation_dispatch_node",
+            "after_hours_dispatch_node": "after_hours_dispatch_node",
             "lab_dispatch_node": "lab_dispatch_node",
             "followup_dispatch_node": "followup_dispatch_node",
             "booking_dispatch_node": "booking_dispatch_node",
@@ -342,6 +355,7 @@ def build_router_graph(checkpointer=None):
 
     g.add_edge("emergency_dispatch_node", END)
     g.add_edge("consultation_dispatch_node", END)
+    g.add_edge("after_hours_dispatch_node", END)
     g.add_edge("lab_dispatch_node", END)
     g.add_edge("followup_dispatch_node", END)
     g.add_edge("booking_dispatch_node", END)

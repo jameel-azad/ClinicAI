@@ -1,6 +1,13 @@
 import os
 import re
 
+import re as _re
+
+def _strip_dr(name: str) -> str:
+    """Remove leading 'Dr.' / 'Dr ' so templates can add it once consistently."""
+    return _re.sub(r"(?i)^dr\.?\s*", "", name).strip()
+
+
 from app.services.appointment_approval import handle_appointment_button_reply, handle_doctor_approval_reply
 from app.services.doctor_setup import handle_doctor_setup_message
 from app.services.soap_approval import handle_soap_approval_reply, handle_soap_button_reply
@@ -29,6 +36,12 @@ def handle_doctor_message(
         apt_reply = handle_appointment_button_reply(button_payload, doctor_number)
         if apt_reply:
             return apt_reply
+
+    # CLOSE command — doctor explicitly ends a patient's follow-up session
+    if doctor_number:
+        close_reply = _handle_close_session(message, doctor_number, name)
+        if close_reply:
+            return close_reply
 
     if doctor_number:
         soap_reply = handle_soap_approval_reply(message, doctor_number)
@@ -106,7 +119,7 @@ def _handle_patient_msg(message: str, doctor_name: str) -> str | None:
     if not patient_text:
         return "Please include a message after the number. Example: *MSG +91NUMBER Hi, please take rest.*"
 
-    outbound = f"📩 *Dr. {doctor_name}:* {patient_text}"
+    outbound = f"📩 *Dr. {_strip_dr(doctor_name)}:* {patient_text}"
     sent = send_whatsapp_message_sync(patient_number, outbound)
     if sent:
         return f"✅ Message sent to {patient_number}."
@@ -133,7 +146,7 @@ def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, te
     if not patient_number or not message.strip():
         return None
 
-    outbound = f"📩 *Dr. {doctor_name}:* {message.strip()}"
+    outbound = f"📩 *Dr. {_strip_dr(doctor_name)}:* {message.strip()}"
     sent = send_whatsapp_message_sync(patient_number, outbound)
     if sent:
         pop_doctor_reply_context(doctor_number, patient_number)
@@ -144,7 +157,7 @@ def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, te
 def _doctor_greeting(name: str) -> str:
     clinic = os.getenv("CLINIC_NAME", "ClinicAI")
     return (
-        f"Hello Dr. {name}! 👋\n\n"
+        f"Hello Dr. {_strip_dr(name)}! 👋\n\n"
         f"Welcome to {clinic}. Here's what you can do:\n\n"
         "🎙️ *Voice note* → Send an audio recording and I'll generate a prescription & summary PDF for your patient\n"
         "✅ *Appointments* → Approve or suggest an alternate time for pending patient bookings\n\n"
@@ -208,13 +221,86 @@ def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str) -
     if patient_number:
         send_whatsapp_message_sync(
             patient_number,
-            f"✅ Dr. {doctor_name} has reviewed your lab report and acknowledged it. "
+            f"✅ Dr. {_strip_dr(doctor_name)} has reviewed your lab report and acknowledged it. "
             "If you have any concerns, feel free to reach out.",
         )
 
     delete_pending_lab_review(lab_id)
     print(f"[lab_ack] {lab_id} acknowledged by {doctor_number}, patient {patient_number} notified")
     return f"✅ Acknowledged. {patient_name.capitalize()} has been notified."
+
+
+def _handle_close_session(message: str, doctor_number: str, doctor_name: str) -> str | None:
+    """Handle CLOSE command — doctor explicitly ends a patient's follow-up session.
+
+    Accepts:
+      CLOSE +91XXXXXXXXXX   — close specific patient
+      CLOSE                 — close the patient from active reply context
+    """
+    from app.services.store import get_doctor_reply_context, pop_doctor_reply_context, reset_session, get_session
+    from app.services.whatsapp import send_whatsapp_message_sync
+    from app.services.identity import normalize_whatsapp_number
+
+    match = re.match(
+        r"(?i)^CLOSE(?:\s+(\+?\d[\d\s\-()+]{7,}\d))?$",
+        message.strip(),
+    )
+    if not match:
+        return None
+
+    raw_number = (match.group(1) or "").strip()
+
+    if raw_number:
+        digits = re.sub(r"\D", "", raw_number)
+        patient_number = f"+{digits}" if raw_number.startswith("+") else digits
+    else:
+        # Try active reply context first (most recent patient who messaged)
+        ctx = get_doctor_reply_context(doctor_number)
+        if ctx:
+            patient_number = ctx.get("patient_number", "")
+        else:
+            # Context was popped after doctor replied — scan sessions for a
+            # FOLLOW_UP_PENDING patient still linked to this doctor
+            from app.services.store import all_sessions
+            patient_number = ""
+            seen: set[str] = set()
+            for _sk, sdata in all_sessions().items():
+                fn = sdata.get("from_number", "")
+                if not fn or fn in seen:
+                    continue
+                seen.add(fn)
+                if (
+                    sdata.get("journey_state") == "FOLLOW_UP_PENDING"
+                    and _strip_dr(sdata.get("doctor_name") or "").lower()
+                    == _strip_dr(doctor_name).lower()
+                ):
+                    patient_number = fn
+                    break
+        if not patient_number:
+            return "No active follow-up patient found. Use: *CLOSE +91PATIENT_NUMBER*"
+
+    # Look up patient session to get name and clinic_id
+    session = get_session(patient_number)
+    patient_name = (session.patient_name if session else None) or patient_number
+    clinic_id = session.clinic_id if session else None
+
+    # Reset the patient's session to NEW_PATIENT
+    reset_session(patient_number, clinic_id)
+
+    # Remove from doctor reply context if present
+    pop_doctor_reply_context(doctor_number, patient_number)
+
+    # Notify patient
+    clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
+    send_whatsapp_message_sync(
+        patient_number,
+        f"Your follow-up session with *Dr. {_strip_dr(doctor_name)}* is now complete. "
+        f"Your consultation records have been saved. 😊\n\n"
+        f"Feel free to reach out anytime to book a new appointment. Take care! 🙏\n"
+        f"— {clinic_name}",
+    )
+
+    return f"✅ Session closed for *{patient_name}*. They've been notified and their session has been reset."
 
 
 def _format_pending_approvals(doctor_number: str | None) -> str:

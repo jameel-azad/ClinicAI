@@ -182,6 +182,28 @@ def delete_session(from_number: str, clinic_id: str | None = None) -> None:
     _sessions.pop(from_number, None)
 
 
+def reset_session(from_number: str, clinic_id: str | None = None) -> None:
+    """Reset a patient session to NEW_PATIENT while preserving identity fields.
+
+    Clears all booking/consultation state so the patient starts fresh, but keeps
+    from_number, clinic_id, and patient_name so returning patients are recognised.
+    """
+    session = get_session(from_number, clinic_id) or BookingSession(
+        from_number=from_number, clinic_id=clinic_id
+    )
+    session.journey_state = "NEW_PATIENT"
+    session.state = "GREETING"
+    session.symptoms = None
+    session.requested_date = None
+    session.requested_time = None
+    session.new_requested_date = None
+    session.new_requested_time = None
+    session.doctor_name = None
+    session.doctor_shortlist = None
+    session.last_bot_response = None
+    save_session(session)
+
+
 def all_sessions() -> dict:
     if _r is not None:
         result = {}

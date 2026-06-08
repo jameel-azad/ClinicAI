@@ -13,7 +13,12 @@ from app.graph.scribe.nodes import overall_soap_confidence, low_confidence_secti
 from app.graph.scribe.pipeline import scribe_pipeline
 from app.graph.scribe.state import ScribeState
 from app.services.store import all_appointments
-from app.services.whatsapp import download_media_bytes, send_whatsapp_document_sync, send_whatsapp_message_sync
+from app.services.whatsapp import (
+    download_media_bytes,
+    send_whatsapp_document_sync,
+    send_whatsapp_message_sync,
+    send_whatsapp_template_sync,
+)
 
 
 load_dotenv()
@@ -114,16 +119,34 @@ async def handle_doctor_voice_note(
         # ─────────────────────────────────────────────────────────────────────
 
         public_url = _public_pdf_url(document_id)
+        fhir_summary = _format_fhir_whatsapp_summary(
+            result.get("snomed_mappings") or [],
+            result.get("fhir_bundle") or {},
+        )
         soap_content_sid = os.getenv("SOAP_APPROVAL_CONTENT_SID", "").strip()
 
-        if False:
-            pass  # Template flow removed — Twilio uses text fallback below
-        else:
-            # ── Text fallback (no template configured) ───────────────────────────
-            fhir_summary = _format_fhir_whatsapp_summary(
-                result.get("snomed_mappings") or [],
-                result.get("fhir_bundle") or {},
+        if soap_content_sid:
+            # ── Template flow ─────────────────────────────────────────────────
+            # Step 1: send the PDF with clinical details + REGEN hint as caption
+            regen_hint = f"💡 To regenerate with corrections, reply: *REGEN {soap_id} <your feedback>*"
+            if not patient_number:
+                regen_hint += f"\n💡 Patient not identified — to approve, reply: *APPROVE {soap_id} +PATIENT_NUMBER*"
+            pdf_caption = (fhir_summary + confidence_notice + "\n\n" + regen_hint).strip()
+            if public_url:
+                send_whatsapp_document_sync(doctor_number, public_url, "prescription.pdf", pdf_caption)
+            else:
+                send_whatsapp_message_sync(
+                    doctor_number,
+                    pdf_caption + "\n\n⚠️ PDF not publicly accessible — please check PUBLIC_BASE_URL config.",
+                )
+            # Step 2: send the template with Approve / Reject buttons
+            send_whatsapp_template_sync(
+                doctor_number,
+                soap_content_sid,
+                {"1": soap_id, "2": patient_name or "patient"},
             )
+        else:
+            # ── Text fallback (no template configured) ────────────────────────
             if patient_number:
                 approval_msg = (
                     f"📋 Prescription note ready for *{patient_name or 'patient'}*.\n\n"
@@ -150,7 +173,7 @@ async def handle_doctor_voice_note(
             else:
                 send_whatsapp_message_sync(
                     doctor_number,
-                    approval_msg + f"\n\n(PDF saved at: {stored_pdf})",
+                    approval_msg + "\n\n⚠️ PDF not publicly accessible — please check PUBLIC_BASE_URL config.",
                 )
 
         return "Voice note transcribed. Prescription note sent to you for review — approve it to deliver to the patient."

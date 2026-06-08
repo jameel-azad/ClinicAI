@@ -1,0 +1,80 @@
+# Production stack for ClinicAI — single VPS, Caddy auto-HTTPS.
+# Usage:  docker compose -f docker-compose.prod.yml up -d --build
+# Reads ./.env for ${...} substitution below AND as the api container's env_file.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: clinicai
+      POSTGRES_USER: clinicai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinicai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      # Override to the in-network service hostnames (the .env values may point
+      # at localhost for non-docker dev).
+      - DATABASE_URL=postgresql+asyncpg://clinicai:${POSTGRES_PASSWORD}@postgres:5432/clinicai
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - generated_data:/app/generated
+      # Google OAuth files are gitignored — place them in the repo root on the VPS.
+      - ./google_credentials.json:/app/google_credentials.json:ro
+      - ./google_token.json:/app/google_token.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        # Baked into the JS bundle at build time.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?set NEXT_PUBLIC_API_URL in .env}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - API_HOST=${API_HOST:?set API_HOST in .env}
+      - APP_HOST=${APP_HOST:?set APP_HOST in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - dashboard
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  generated_data:
+  caddy_data:
+  caddy_config:

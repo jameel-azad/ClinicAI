@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 
@@ -98,10 +99,49 @@ def send_whatsapp_document_sync(
             ).result(timeout=20)
 
 
+async def send_whatsapp_template_async(
+    to: str, content_sid: str, variables: dict
+) -> bool:
+    """Send a Twilio Content Template message (supports quick-reply buttons)."""
+    sid, token, from_num = _creds()
+    try:
+        async with httpx.AsyncClient(auth=(sid, token)) as client:
+            response = await client.post(
+                _messages_url(),
+                data={
+                    "From": from_num,
+                    "To": _twilio_to(to),
+                    "ContentSid": content_sid,
+                    "ContentVariables": json.dumps({str(k): str(v) for k, v in variables.items()}),
+                },
+                timeout=30,
+            )
+        response.raise_for_status()
+        logger.info("WhatsApp template sent to %s (SID: %s)", to, content_sid)
+        return True
+    except httpx.HTTPStatusError as exc:
+        logger.error("WhatsApp template failed (HTTP %s): %s", exc.response.status_code, exc.response.text)
+        return False
+    except Exception as exc:
+        logger.error("WhatsApp template failed: %s", exc)
+        return False
+
+
+def send_whatsapp_template_sync(to: str, content_sid: str, variables: dict) -> bool:
+    try:
+        return asyncio.run(send_whatsapp_template_async(to, content_sid, variables))
+    except RuntimeError:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run, send_whatsapp_template_async(to, content_sid, variables)
+            ).result(timeout=20)
+
+
 async def send_whatsapp_interactive_buttons(
     to: str, body_text: str, buttons: list[dict]
 ) -> bool:
-    # Twilio sandbox doesn't support Meta-style interactive buttons — send as plain text
+    # Fallback for when no Content Template SID is configured
     options = "\n".join(f"• {b['title']}" for b in buttons[:3])
     return await send_whatsapp_message_async(to, f"{body_text}\n\n{options}")
 

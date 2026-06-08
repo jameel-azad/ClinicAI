@@ -1,0 +1,31 @@
+# --- Secrets (NEVER bake into an image) ---
+.env
+.env.*
+google_credentials.json
+google_token.json
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# --- Generated artifacts / runtime data ---
+generated/
+Parser/tests/
+
+# --- VCS / tooling ---
+.git/
+.gitignore
+.claude/
+.gemini/
+
+# --- The dashboard builds from its own context (./dashboard) ---
+dashboard/
+
+# --- Docs & local-only helpers (not needed in the API image) ---
+*.md
+docker-compose*.yml
+Caddyfile

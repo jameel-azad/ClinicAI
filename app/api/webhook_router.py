@@ -147,6 +147,15 @@ async def twilio_webhook(
         f"To: {To}"
     )
 
+    # Upsert patient row immediately so the dashboard shows every patient
+    # who has ever messaged the clinic — not just post-consultation ones.
+    if identity.role == "patient" and clinic_id:
+        try:
+            from app.services.patient_service import upsert_patient
+            asyncio.create_task(upsert_patient(clinic_id, from_number))
+        except Exception:
+            pass
+
     reply = ""
 
     if identity.role == "doctor":
@@ -217,6 +226,15 @@ async def twilio_webhook(
                     save_session(BookingSession(**sess_dict))
                 except Exception as sess_err:
                     print(f"[WARN] Could not persist session: {sess_err}")
+
+            # Update patient name in DB once the booking flow captures it
+            captured_name = (final_state.get("session") or {}).get("patient_name")
+            if captured_name and clinic_id and identity.role == "patient":
+                try:
+                    from app.services.patient_service import upsert_patient
+                    asyncio.create_task(upsert_patient(clinic_id, from_number, captured_name))
+                except Exception:
+                    pass
 
         except Exception as e:
             print(f"[ERROR] Booking graph failed: {e}")

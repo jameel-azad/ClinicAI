@@ -157,6 +157,60 @@ async def save_consultation_record(
         return None
 
 
+async def get_latest_consultation_record(
+    clinic_id: str,
+    patient_phone: str,
+) -> Optional[dict]:
+    """Return the patient's most recent consultation record as a plain dict.
+
+    Used by the follow-up agent to provide consultation context when deciding
+    whether a patient query can be answered automatically or must be escalated.
+    Returns None if no record exists or on DB error.
+    """
+    from app.models.patient import Patient
+    from app.models.medical_record import MedicalRecord
+    from sqlalchemy import desc
+
+    try:
+        async with AsyncSessionLocal() as db:
+            patient_result = await db.execute(
+                select(Patient).where(
+                    Patient.clinic_id == clinic_id,
+                    Patient.phone_number == patient_phone,
+                )
+            )
+            patient = patient_result.scalar_one_or_none()
+            if not patient:
+                return None
+
+            record_result = await db.execute(
+                select(MedicalRecord)
+                .where(
+                    MedicalRecord.patient_id == patient.id,
+                    MedicalRecord.record_type == "consultation",
+                )
+                .order_by(desc(MedicalRecord.visit_date))
+                .limit(1)
+            )
+            record = record_result.scalar_one_or_none()
+            if not record:
+                return None
+
+            return {
+                "chief_complaint": record.chief_complaint,
+                "soap_subjective": record.soap_subjective,
+                "soap_assessment": record.soap_assessment,
+                "soap_plan": record.soap_plan,
+                "diagnoses": record.diagnoses or [],
+                "medications": record.medications or [],
+                "symptoms": record.symptoms or [],
+                "visit_date": str(record.visit_date) if record.visit_date else None,
+            }
+    except Exception as exc:
+        logger.error("[patient_service] get_latest_consultation_record failed: %s", exc)
+        return None
+
+
 async def save_lab_record(
     clinic_id: str,
     patient_phone: str,

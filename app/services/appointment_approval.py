@@ -2,12 +2,17 @@ import asyncio
 import os
 import re
 import uuid
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.schemas import AppointmentRecord, BookingSession
 from app.services.google_calendar import (
     calendar_enabled,
     check_google_availability,
     create_google_calendar_event,
+    is_vague_time,
+    period_window,
+    resolve_date,
     suggest_google_slots,
 )
 from app.services.identity import find_doctor_number, normalize_whatsapp_number
@@ -25,7 +30,12 @@ from app.services.store import (
     clear_slot_suggestions,
     update_pending_approval,
 )
-from app.services.whatsapp import send_whatsapp_interactive_buttons, send_whatsapp_message_sync
+from app.services.whatsapp import (
+    send_whatsapp_interactive_buttons,
+    send_whatsapp_message_sync,
+    send_whatsapp_template_async,
+    send_whatsapp_template_sync,
+)
 
 
 async def send_approval_request_to_doctor(
@@ -35,7 +45,23 @@ async def send_approval_request_to_doctor(
     date_str: str,
     time_str: str,
     symptoms: str,
+    doctor_name: str = "",
 ) -> bool:
+    content_sid = os.getenv("APPOINTMENT_APPROVAL_CONTENT_SID", "").strip()
+    if content_sid:
+        return await send_whatsapp_template_async(
+            doctor_number,
+            content_sid,
+            {
+                "1": approval_id,
+                "2": patient_name,
+                "3": doctor_name or "Doctor",
+                "4": date_str,
+                "5": time_str,
+                "6": symptoms or "Not specified",
+            },
+        )
+    # Fallback: plain text with button list
     body = (
         f"📅 *New Appointment Request*\n\n"
         f"Patient: *{patient_name}*\n"
@@ -58,27 +84,27 @@ def send_approval_request_sync(
     date_str: str,
     time_str: str,
     symptoms: str,
+    doctor_name: str = "",
 ) -> bool:
     import logging
     logger = logging.getLogger(__name__)
     try:
         result = asyncio.run(
             send_approval_request_to_doctor(
-                doctor_number, approval_id, patient_name, date_str, time_str, symptoms
+                doctor_number, approval_id, patient_name, date_str, time_str, symptoms, doctor_name
             )
         )
         if not result:
             logger.error("[approval] Twilio rejected message to doctor %s for approval %s", doctor_number, approval_id)
         return result
     except RuntimeError:
-        # asyncio.run() fails if there's already a running event loop in this thread
         import concurrent.futures
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(
                     asyncio.run,
                     send_approval_request_to_doctor(
-                        doctor_number, approval_id, patient_name, date_str, time_str, symptoms
+                        doctor_number, approval_id, patient_name, date_str, time_str, symptoms, doctor_name
                     ),
                 )
                 return future.result(timeout=20)
@@ -90,6 +116,94 @@ def send_approval_request_sync(
         return False
 
 
+_DOW = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _parse_working_days(text: str) -> set[int]:
+    """Parse 'Mon-Sat' from a working-hours string → {0,1,2,3,4,5}. Defaults Mon-Sat."""
+    m = re.search(
+        r"(mon|tue|wed|thu|fri|sat|sun)\s*[-–]\s*(mon|tue|wed|thu|fri|sat|sun)",
+        (text or "").lower(),
+    )
+    if m:
+        start, end = _DOW[m.group(1)], _DOW[m.group(2)]
+        if start <= end:
+            return set(range(start, end + 1))
+        return set(range(start, 7)) | set(range(0, end + 1))
+    return {0, 1, 2, 3, 4, 5}
+
+
+def _doctor_hours(profile: dict) -> tuple[int, int, set[int]]:
+    """Return (start_hour, end_hour, working_weekdays) from a doctor profile."""
+    text = profile.get("working_hours") or ""
+    m = re.search(r"(\d{1,2})(?::\d{2})?\s*[-–]\s*(\d{1,2})(?::\d{2})?", text)
+    start = int(m.group(1)) if m else int(os.getenv("CLINIC_OPEN_HOUR", "9"))
+    end = int(m.group(2)) if m else int(os.getenv("CLINIC_CLOSE_HOUR", "18"))
+    return start, end, _parse_working_days(text)
+
+
+def _fmt_time(value: datetime) -> str:
+    return value.strftime("%I:%M %p").lstrip("0")
+
+
+def resolve_slot(
+    doctor_name: str | None,
+    date_str: str | None,
+    time_str: str | None,
+) -> tuple[str | None, str | None]:
+    """Turn a vague date/time ('tomorrow', 'anytime') into a concrete, bookable slot.
+
+    - Resolves relative/weekday/explicit dates to a concrete 'D Month YYYY' string.
+    - Skips forward to the next working day when the date lands on a clinic-closed day.
+    - For a vague time, scans the doctor's working-hour window and returns the first
+      slot ``is_slot_available`` reports free (covers Google + local calendars).
+
+    Idempotent: a date/time that is already concrete is returned unchanged. Falls back
+    to the original strings if the date cannot be parsed.
+    """
+    profile = find_doctor_profile_by_name(doctor_name) or {}
+    start_h, end_h, work_days = _doctor_hours(profile)
+    tz = ZoneInfo(os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata"))
+
+    resolved = resolve_date(date_str, tz)
+    if resolved is None:
+        return date_str, time_str  # unparseable — leave as-is
+
+    for _ in range(7):  # roll to next working day if clinic is closed
+        if resolved.weekday() in work_days:
+            break
+        resolved = resolved + timedelta(days=1)
+    resolved_date = f"{resolved.day} {resolved.strftime('%B %Y')}"
+
+    if not is_vague_time(time_str):
+        return resolved_date, time_str
+
+    win = period_window(time_str) or (start_h, end_h)
+    win_start, win_end = max(start_h, win[0]), min(end_h, win[1])
+    if win_start >= win_end:
+        win_start, win_end = start_h, end_h
+
+    duration = int(
+        profile.get("appointment_duration_minutes")
+        or os.getenv("APPOINTMENT_DURATION_MINUTES", "30")
+    )
+    buffer = int(profile.get("buffer_minutes") or 0)
+    step = max(15, duration + buffer)
+
+    cursor = datetime(resolved.year, resolved.month, resolved.day, win_start, 0)
+    window_end = datetime(resolved.year, resolved.month, resolved.day, win_end, 0)
+    first_slot = _fmt_time(cursor)
+    while cursor < window_end:
+        candidate = _fmt_time(cursor)
+        available, _ = is_slot_available(doctor_name, resolved_date, candidate)
+        if available:
+            return resolved_date, candidate
+        cursor += timedelta(minutes=step)
+
+    # No free slot found in the window — fall back to the first slot of the day.
+    return resolved_date, first_slot
+
+
 def request_doctor_approval(session: BookingSession, patient_number: str) -> tuple[str, str | None]:
     doctor_number = find_doctor_number(session.doctor_name)
     if not doctor_number:
@@ -98,6 +212,12 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
             "Please ask the clinic admin to set DOCTOR_WHATSAPP_NUMBERS.",
             None,
         )
+
+    # Resolve any vague date/time ('tomorrow', 'anytime') to a concrete bookable slot
+    # before checking availability. Idempotent — a no-op if already concrete.
+    session.requested_date, session.requested_time = resolve_slot(
+        session.doctor_name, session.requested_date, session.requested_time
+    )
 
     slot_available, availability_reason = is_slot_available(
         session.doctor_name,
@@ -149,6 +269,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         session.requested_date,
         session.requested_time,
         _format_symptoms(session.symptoms),
+        session.doctor_name or "",
     )
     print(f"[Approval] Message sent={sent} to doctor {doctor_number}")
 
@@ -364,7 +485,12 @@ def _approve(approval: dict) -> str:
             print(f"[WARN] Could not persist patient on approval: {_pe}")
     profile = find_doctor_profile_by_name(approval.get("doctor_name", "")) or {}
     cal_id = profile.get("google_calendar_id") or None
-    google_event_id = create_google_calendar_event(approval, calendar_id=cal_id)
+    try:
+        google_event_id = create_google_calendar_event(approval, calendar_id=cal_id)
+    except Exception as exc:
+        # A calendar hiccup must never block the confirmation the patient is waiting for.
+        print(f"[WARN] Google Calendar event creation failed for {appointment_id}: {exc}")
+        google_event_id = None
     update_pending_approval(
         appointment_id,
         status="approved",
@@ -387,14 +513,15 @@ def _approve(approval: dict) -> str:
         time_str=appt.time_str,
     )
 
+    clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
     send_whatsapp_message_sync(
         appt.from_number,
         (
-            "Appointment confirmed.\n\n"
-            f"Doctor: {appt.doctor_name}\n"
+            f"✅ *Appointment Confirmed* — {clinic_name}\n\n"
+            f"Doctor: *{appt.doctor_name}*\n"
             f"Date: {appt.date_str}\n"
             f"Time: {appt.time_str}\n\n"
-            "The doctor has approved this slot."
+            "Please arrive 5–10 minutes early. Reply if you need to reschedule."
         ),
     )
 
@@ -407,8 +534,8 @@ def _reject(approval: dict) -> str:
     send_whatsapp_message_sync(
         approval["patient_number"],
         (
-            f"{approval.get('doctor_name') or 'The doctor'} could not approve that slot. "
-            "Please send another preferred date and time."
+            f"❌ *{approval.get('doctor_name') or 'The doctor'}* could not approve that slot.\n\n"
+            "Please send another preferred date and time and we'll find you a new slot."
         ),
     )
     return f"Rejected {approval_id}. I have asked the patient for another slot."

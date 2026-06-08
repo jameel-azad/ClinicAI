@@ -3,6 +3,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+# NEXT_PUBLIC_* vars are inlined at build time, so the API URL must be present
+# as an env var BEFORE `npm run build`. Supplied via --build-arg by compose.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 FROM node:20-alpine AS runner

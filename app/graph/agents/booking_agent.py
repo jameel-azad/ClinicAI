@@ -14,6 +14,7 @@ from app.services.appointment_approval import (
     latest_patient_approval_status,
     request_doctor_approval,
     request_suggested_slot_approval,
+    resolve_slot,
 )
 from app.services.store import (
     cancel_appointment,
@@ -195,6 +196,32 @@ def _has_booking_keywords(message: str) -> bool:
     return any(kw in msg_lower for kw in _BOOKING_KEYWORDS)
 
 
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hiiii", "hello", "helo", "hlo", "hey", "heyy", "heya",
+    "yo", "namaste", "namaskar", "namastey", "hola", "salaam", "assalam", "adaab",
+    "gm", "start", "greetings", "hey there", "hii there",
+}
+_GREETING_PHRASES = {
+    "good morning", "good afternoon", "good evening", "good day",
+    "hey there", "hi there", "hello there",
+}
+
+def _is_greeting(message: str) -> bool:
+    """True when the message is a bare greeting ('hi', 'hello', 'namaste', 'gm')
+    rather than an actual question — so we can reply with the welcome template."""
+    msg = message.strip().lower()
+    cleaned = re.sub(r"[^\w\s]", "", msg).strip()  # drop punctuation/emoji
+    if not cleaned:
+        return False
+    words = cleaned.split()
+    if len(words) <= 3:
+        if any(w in _GREETING_WORDS for w in words):
+            return True
+        if any(p in msg for p in _GREETING_PHRASES):
+            return True
+    return False
+
+
 def _is_affirmative(message: str) -> bool:
     return _word_match(
         message,
@@ -218,6 +245,18 @@ def _wants_to_continue(message: str) -> bool:
 
 def _wants_to_stop(message: str) -> bool:
     return _word_match(message, words={"stop", "nahi", "cancel", "band", "no"})
+
+
+def _finalize_slot(session: BookingSession) -> None:
+    """Resolve vague date/time ('tomorrow', 'anytime') into a concrete bookable slot
+    so the confirmation shows a real date/time and downstream calendar/reminders work.
+    Mutates the session in place; best-effort (leaves values untouched on failure)."""
+    try:
+        session.requested_date, session.requested_time = resolve_slot(
+            session.doctor_name, session.requested_date, session.requested_time
+        )
+    except Exception as exc:
+        print(f"[WARN] slot resolution failed: {exc}")
 
 
 def _get_resume_message(session_dict: dict) -> str:
@@ -312,6 +351,7 @@ def flow_node(state: BookingState) -> dict:
             if not session.requested_time: remaining.append("requested_time")
 
             if not remaining:
+                _finalize_slot(session)
                 session.state = "CONFIRM_SLOT"
                 return {
                     "session": session.model_dump(),
@@ -449,7 +489,9 @@ def flow_node(state: BookingState) -> dict:
             session.state = "COLLECTING_INFO"
 
         if booking_state == "GREETING" and not is_booking:
-            reply = bot_response or MSG_GREETING
+            # A bare greeting gets the predefined welcome menu; a real general
+            # question (timings, fees, …) keeps the classifier's tailored answer.
+            reply = MSG_GREETING if _is_greeting(incoming_message) else (bot_response or MSG_GREETING)
         elif booking_state == "GREETING" and is_booking:
             reply = MSG_START_BOOKING
         else:
@@ -461,6 +503,7 @@ def flow_node(state: BookingState) -> dict:
             "pipeline_log": [f"flow_node: COLLECTING_INFO — missing {missing}"],
         }
     else:
+        _finalize_slot(session)
         session.state = "CONFIRM_SLOT"
         reply = MSG_CONFIRM.format(
             doctor=session.doctor_name,

@@ -301,8 +301,9 @@ def _patient_bar(
 
     # Row 1: name (left), visit info (right)
     col_w = full_w / 2
+    _empty = [Paragraph("", styles["pt_value"])]
     if row1_left or row1_right:
-        data1 = [[row1_left or [""], row1_right or [""]]]
+        data1 = [[row1_left or _empty, row1_right or _empty]]
         t1 = Table(data1, colWidths=[col_w, col_w])
         t1.setStyle(TableStyle([
             ("VALIGN",  (0, 0), (-1, -1), "TOP"),

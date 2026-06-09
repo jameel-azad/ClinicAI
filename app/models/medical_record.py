@@ -46,6 +46,10 @@ class MedicalRecord(Base):
     # FHIR bundle (JSON)
     fhir_bundle: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Doctor name stored as text so it shows even when doctor_id FK lookup fails
+    # (e.g. env-only doctors not registered in the DB yet)
+    doctor_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # PDF link
     pdf_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 

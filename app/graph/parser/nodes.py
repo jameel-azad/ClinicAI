@@ -17,15 +17,12 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _llm(model: str = None) -> ChatGroq:
-    """Return a ChatGroq instance. Model is pulled from env if not given."""
+def _llm(model: str = None, enc_key: str = None) -> ChatGroq:
+    """Return a ChatGroq instance using the clinic-specific key (or env fallback)."""
+    from app.services.llm_factory import get_llm_for_vendor
     import os
     m = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    return ChatGroq(
-        model=m,
-        temperature=0,
-        groq_api_key=os.getenv("GROQ_API_KEY"),
-    )
+    return get_llm_for_vendor("groq", m, enc_key, temperature=0, max_tokens=4096)
 
 
 def _parse_json_response(text: str) -> Any:
@@ -156,7 +153,7 @@ def extract_all_node(state: ReportState) -> dict:
         return {"patient_info": patient_info, "all_values": [], "errors": errors}
 
     try:
-        llm = _llm()
+        llm = _llm(enc_key=state.get("llm_enc_key"))
         chunk = raw_text[:6000]
         messages = [
             SystemMessage(content=EXTRACT_ALL_SYSTEM),
@@ -375,7 +372,7 @@ def generate_summary_node(state: ReportState) -> dict:
     context = "\n".join(context_lines)
 
     try:
-        llm = _llm()
+        llm = _llm(enc_key=state.get("llm_enc_key"))
         messages = [
             SystemMessage(content=SUMMARY_AND_CRITICALS_SYSTEM),
             HumanMessage(content=f"--- BEGIN UNTRUSTED CONTEXT ---\n{context}\n--- END UNTRUSTED CONTEXT ---"),

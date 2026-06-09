@@ -114,6 +114,53 @@ async def _resolve_clinic(to_number: str, db: AsyncSession):
         return None
 
 
+async def _resolve_model_config(clinic_id: str | None, db: AsyncSession):
+    """Fetch ModelConfig for this clinic, or None if not found."""
+    if not clinic_id:
+        return None
+    try:
+        from app.models.model_config import ModelConfig
+        result = await db.execute(
+            select(ModelConfig).where(ModelConfig.clinic_id == clinic_id)
+        )
+        return result.scalar_one_or_none()
+    except Exception:
+        return None
+
+
+def _build_llm_state_fields(model_cfg) -> dict:
+    """Convert a ModelConfig ORM row into the flat LLM state fields.
+
+    Falls back gracefully to env-var defaults so every request works even when
+    a clinic has no custom config yet.
+    """
+    if model_cfg is None:
+        return {
+            "llm_vendor": "groq",
+            "llm_model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "llm_enc_key": None,
+            "stt_model": os.getenv("WHISPER_MODEL", "whisper-large-v3-turbo"),
+            "stt_enc_key": None,
+        }
+
+    vendor = (model_cfg.llm_vendor or "groq").lower()
+    vendor_key_map = {
+        "groq":      model_cfg.groq_api_key_enc,
+        "anthropic": model_cfg.anthropic_api_key_enc,
+        "openai":    model_cfg.openai_api_key_enc,
+        "google":    model_cfg.google_api_key_enc,
+        "gemini":    model_cfg.google_api_key_enc,
+    }
+    return {
+        "llm_vendor":  vendor,
+        "llm_model":   model_cfg.llm_model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "llm_enc_key": vendor_key_map.get(vendor),
+        "stt_model":   model_cfg.stt_model or os.getenv("WHISPER_MODEL", "whisper-large-v3-turbo"),
+        # STT always runs on Groq Whisper — use the clinic's Groq key
+        "stt_enc_key": model_cfg.groq_api_key_enc,
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # POST /webhook/twilio — Twilio inbound messages
@@ -136,11 +183,14 @@ async def twilio_webhook(
     from_number = identity.phone_number
     message_text = Body.strip()
 
-    # Resolve clinic from Twilio "To" number — gives us per-clinic hours
+    # Resolve clinic from Twilio "To" number — gives us per-clinic hours + model config
     clinic = await _resolve_clinic(To, db)
-    clinic_id       = clinic.id          if clinic else None
-    clinic_open_hour  = clinic.open_hour  if clinic else _DEFAULT_OPEN_HOUR
-    clinic_close_hour = clinic.close_hour if clinic else _DEFAULT_CLOSE_HOUR
+    clinic_id         = clinic.id          if clinic else None
+    clinic_open_hour  = clinic.open_hour   if clinic else _DEFAULT_OPEN_HOUR
+    clinic_close_hour = clinic.close_hour  if clinic else _DEFAULT_CLOSE_HOUR
+
+    model_cfg = await _resolve_model_config(clinic_id, db)
+    llm_fields = _build_llm_state_fields(model_cfg)
 
     print(
         f"\n[Webhook] From: {from_number} | Role: {identity.role} | "
@@ -172,6 +222,8 @@ async def twilio_webhook(
                 doctor_number=identity.phone_number,
                 doctor_name=identity.display_name,
                 caption=message_text,
+                llm_enc_key=llm_fields.get("llm_enc_key"),
+                stt_enc_key=llm_fields.get("stt_enc_key"),
             )
         else:
             reply = handle_doctor_message(
@@ -189,7 +241,10 @@ async def twilio_webhook(
         print(f"[Webhook] Received PDF: {MediaUrl0}")
         from app.services.pdf_service import handle_incoming_pdf
 
-        reply = await handle_incoming_pdf(MediaUrl0, from_number)
+        reply = await handle_incoming_pdf(
+            MediaUrl0, from_number,
+            llm_enc_key=llm_fields.get("llm_enc_key"),
+        )
     else:
         config = {"configurable": {"thread_id": from_number}}
         state_update = {
@@ -198,6 +253,7 @@ async def twilio_webhook(
             "clinic_id": clinic_id,
             "clinic_open_hour": clinic_open_hour,
             "clinic_close_hour": clinic_close_hour,
+            **llm_fields,
         }
 
         try:

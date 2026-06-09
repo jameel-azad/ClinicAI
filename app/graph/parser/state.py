@@ -31,9 +31,10 @@ class ReportState(TypedDict, total=False):
     """
     # --- Inputs ---
     pdf_path: str                        # Path to the uploaded PDF
-    patient_name: Optional[str]    # Optional override from API caller
+    patient_name: Optional[str]          # Optional override from API caller
     patient_age: Optional[str]
     patient_gender: Optional[str]
+    llm_enc_key: Optional[str]           # Fernet-encrypted Groq key; None → env fallback
 
     # --- Node outputs ---
     raw_text: str                        # Raw text extracted from PDF pages

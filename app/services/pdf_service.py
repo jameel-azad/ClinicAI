@@ -163,7 +163,11 @@ def format_report_reply(state: dict) -> str:
     return "\n".join(reply_lines)
 
 
-async def handle_incoming_pdf(media_id: str, from_number: str = "") -> str:
+async def handle_incoming_pdf(
+    media_id: str,
+    from_number: str = "",
+    llm_enc_key: str | None = None,
+) -> str:
     """
     Handle a WhatsApp PDF from a patient:
     1. Download + safety check + parse (pipeline runs in a thread to avoid blocking the event loop)
@@ -181,9 +185,8 @@ async def handle_incoming_pdf(media_id: str, from_number: str = "") -> str:
             return "This document does not appear to be a valid lab report or could not be verified for safety."
 
         print(f"[Parser] Invoking pipeline for {temp_path}")
-        # Run the synchronous LangGraph pipeline in a thread so it doesn't block the event loop
         final_state = await asyncio.to_thread(
-            lab_report_pipeline.invoke, {"pdf_path": temp_path}
+            lab_report_pipeline.invoke, {"pdf_path": temp_path, "llm_enc_key": llm_enc_key}
         )
 
         errors = final_state.get("errors", [])
@@ -329,3 +332,11 @@ def _forward_report_to_doctor(
                 f"Original lab report — {patient_name}",
             )
         print(f"[Parser] Report forwarded to doctor {number}")
+        # Set reply context so the doctor can type a free-form reply that
+        # goes straight back to the patient — no MSG command needed.
+        if from_number:
+            try:
+                from app.services.store import save_doctor_reply_context
+                save_doctor_reply_context(number, from_number, patient_name)
+            except Exception as _e:
+                logger.warning("[Parser] Could not set reply context for %s: %s", number, _e)

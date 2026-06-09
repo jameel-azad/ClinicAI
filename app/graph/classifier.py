@@ -10,21 +10,13 @@ from langgraph.graph import StateGraph, START, END
 
 from app.schemas import ClassifierState
 from app.prompts import CLASSIFIER_SYSTEM_PROMPT, CLASSIFIER_FEW_SHOT
+from app.services.llm_factory import get_llm_for_vendor
 
 load_dotenv()
 
-# ── LLM clients ───────────────────────────────────────────────────────────────
-
-def _get_groq_llm() -> ChatGroq:
-    return ChatGroq(
-        api_key=os.getenv("GROQ_API_KEY"),
-        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        temperature=0.1,
-        max_tokens=512,
-    )
-
 
 def _get_gemini_llm():
+    """System-level Gemini fallback — always uses env vars, not per-clinic config."""
     key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not key:
         return None
@@ -34,7 +26,7 @@ def _get_gemini_llm():
             google_api_key=key,
             model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             temperature=0.1,
-            max_tokens=512,
+            max_output_tokens=512,
             max_retries=1,
         )
     except ImportError:
@@ -201,8 +193,12 @@ def classify_node(state: ClassifierState) -> dict:
 
     context_message = state.get("context_message")
 
+    vendor  = state.get("llm_vendor", "groq")
+    model   = state.get("llm_model",  os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
+    enc_key = state.get("llm_enc_key")
+
     try:
-        llm = _get_groq_llm()
+        llm = get_llm_for_vendor(vendor, model, enc_key, temperature=0.1, max_tokens=512)
         intents = _call_llm(llm, messages_history, context_message=context_message)
         result = intents[0]
 
@@ -221,12 +217,12 @@ def classify_node(state: ClassifierState) -> dict:
             "llm_error": None,
             "pipeline_log": [
                 f"classify_node: OK — intent={result['intent']} "
-                f"conf={result['confidence']:.2f} via Groq"
+                f"conf={result['confidence']:.2f} via {vendor}"
             ],
         }
 
     except Exception as e:
-        print(f"[WARN] classify_node Groq error: {e}")
+        print(f"[WARN] classify_node {vendor} error: {e}")
         return {
             "llm_error": str(e),
             "pipeline_log": [f"classify_node: FAILED — {str(e)[:80]}"],

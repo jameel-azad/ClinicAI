@@ -145,9 +145,14 @@ export default function OverviewPage() {
             {config ? (
               <>
                 <Badge variant="outline" className="w-fit capitalize">
-                  {config.vendor}
+                  {config.llm_vendor}
                 </Badge>
-                <span className="text-sm font-medium">{config.model}</span>
+                <span className="text-sm font-medium">{config.llm_model}</span>
+                {config.stt_model && (
+                  <span className="text-xs text-muted-foreground">
+                    STT: {config.stt_model}
+                  </span>
+                )}
               </>
             ) : (
               <span className="text-sm text-muted-foreground">

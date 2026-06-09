@@ -13,6 +13,7 @@ POST /test   test LLM connectivity with the saved configuration
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 from uuid import uuid4
 
@@ -26,6 +27,8 @@ from app.models.clinic import Clinic
 from app.models.model_config import ModelConfig
 from app.models.user import ClinicUser
 from app.services.llm_factory import encrypt_api_key, test_llm_connection
+
+_audit = logging.getLogger("audit.model_config")
 
 router = APIRouter(
     prefix="/api/clinics/{clinic_id}/config",
@@ -159,17 +162,32 @@ async def update_model_config(
         cfg.stt_model = body.stt_model
 
     # Only encrypt and update a key when a non-empty value is supplied.
+    keys_updated: list[str] = []
     if body.groq_api_key and body.groq_api_key.strip():
         cfg.groq_api_key_enc = encrypt_api_key(body.groq_api_key.strip())
+        keys_updated.append("groq")
     if body.anthropic_api_key and body.anthropic_api_key.strip():
         cfg.anthropic_api_key_enc = encrypt_api_key(body.anthropic_api_key.strip())
+        keys_updated.append("anthropic")
     if body.openai_api_key and body.openai_api_key.strip():
         cfg.openai_api_key_enc = encrypt_api_key(body.openai_api_key.strip())
+        keys_updated.append("openai")
     if body.google_api_key and body.google_api_key.strip():
         cfg.google_api_key_enc = encrypt_api_key(body.google_api_key.strip())
+        keys_updated.append("google")
 
     await db.commit()
     await db.refresh(cfg)
+
+    _audit.info(
+        "model_config_updated clinic_id=%s user=%s vendor=%s model=%s keys_rotated=%s",
+        clinic_id,
+        current_user.email,
+        cfg.llm_vendor,
+        cfg.llm_model,
+        keys_updated or "none",
+    )
+
     return _config_to_response(cfg)
 
 

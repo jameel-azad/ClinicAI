@@ -73,6 +73,11 @@ class ClassifierState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]  # Chat memory
     context_message: Optional[str]      # Previous bot response (for context-aware classification)
 
+    # ── Per-clinic LLM config (resolved at webhook entry, passed through state) ─
+    llm_vendor: str                     # e.g. "groq" | "anthropic" | "openai" | "google"
+    llm_model: str                      # e.g. "llama-3.3-70b-versatile"
+    llm_enc_key: Optional[str]          # Fernet-encrypted API key; None → fall back to env var
+
     # ── Set by: validate_node ──────────────────────────────────────────────────
     is_valid: bool                      # False if message is empty/invalid
     validation_error: Optional[str]     # Error message if invalid
@@ -190,11 +195,18 @@ class BookingState(TypedDict):
     appointment_id: Optional[str]
     is_off_topic: bool
     pipeline_log: Annotated[list[str], operator.add]
-    # Clinic context — resolved from Twilio "To" number in webhook
+    # ── Clinic context — resolved from Twilio "To" number in webhook ─────────
     clinic_id: Optional[str]
     clinic_open_hour: int
     clinic_close_hour: int
     clinic_closed: bool   # set by after_hours_check_node; only defers doctor-facing messages
+
+    # ── Per-clinic LLM / STT config ───────────────────────────────────────────
+    llm_vendor: str                     # e.g. "groq" | "anthropic" | "openai" | "google"
+    llm_model: str                      # e.g. "llama-3.3-70b-versatile"
+    llm_enc_key: Optional[str]          # Fernet-encrypted LLM API key; None → env fallback
+    stt_model: Optional[str]            # e.g. "whisper-large-v3-turbo"
+    stt_enc_key: Optional[str]          # Fernet-encrypted Groq key for STT; None → env fallback
 
 
 # ── Consultation Models (Sprint 2) ────────────────────────────────────────────

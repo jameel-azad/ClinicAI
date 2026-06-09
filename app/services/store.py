@@ -187,6 +187,7 @@ def reset_session(from_number: str, clinic_id: str | None = None) -> None:
 
     Clears all booking/consultation state so the patient starts fresh, but keeps
     from_number, clinic_id, and patient_name so returning patients are recognised.
+    Also clears any stale approval records so they cannot fire on the next message.
     """
     session = get_session(from_number, clinic_id) or BookingSession(
         from_number=from_number, clinic_id=clinic_id
@@ -202,6 +203,35 @@ def reset_session(from_number: str, clinic_id: str | None = None) -> None:
     session.doctor_shortlist = None
     session.last_bot_response = None
     save_session(session)
+    _clear_approvals_for_patient(from_number)
+
+
+def _clear_approvals_for_patient(patient_number: str) -> None:
+    """Delete all pending/approved appointment approval records for a patient.
+
+    Called on session reset so a stale 'approved' record cannot trigger the
+    booking confirmation message on the patient's very next incoming message.
+    The AppointmentRecord itself is kept — only the transient approval entry
+    (used for the doctor-approval handshake) is removed.
+    """
+    if _r is not None:
+        try:
+            for key in list(_r.scan_iter(f"{_PREFIX}approval:*")):
+                data = _rget(key)
+                if data and data.get("patient_number") == patient_number:
+                    doc_num = data.get("doctor_number")
+                    aid = (data.get("approval_id") or "").upper()
+                    _rdel(key)
+                    if doc_num and aid:
+                        _srem(_key(f"approvals_waiting:{doc_num}"), aid)
+        except Exception as exc:
+            logger.warning("[store] Could not clear approvals for %s: %s", patient_number, exc)
+    to_del = [
+        aid for aid, a in list(_pending_approvals.items())
+        if a.get("patient_number") == patient_number
+    ]
+    for aid in to_del:
+        _pending_approvals.pop(aid, None)
 
 
 def all_sessions() -> dict:

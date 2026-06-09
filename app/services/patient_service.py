@@ -94,12 +94,15 @@ async def save_consultation_record(
     doctor_phone: Optional[str],
     chief_complaint: Optional[str],
     soap_result: dict,  # output from scribe_service / process_consultation_bundle
+    doctor_name_hint: Optional[str] = None,
 ) -> Optional[str]:
     """
     Persist a MedicalRecord of type "consultation" after a SOAP note is generated.
     Returns the record id, or None on failure.
     soap_result keys: soap_note, clinical_entities, fhir_bundle, soap_note_pdf_url
     """
+    import re as _re
+    from sqlalchemy import or_
     from app.models.medical_record import MedicalRecord
     from app.models.doctor import Doctor
 
@@ -108,19 +111,26 @@ async def save_consultation_record(
             # Resolve patient
             patient_id = await upsert_patient(clinic_id, patient_phone, patient_name, db=db)
 
-            # Resolve doctor_id from phone (best-effort)
-            doctor_id = None
+            # Resolve doctor_id from phone — try both +<digits> and digits-only formats
+            # because dashboard users may enter the number with or without the leading +.
+            doctor_id: Optional[str] = None
+            resolved_doctor_name: Optional[str] = doctor_name_hint
             if doctor_phone:
+                digits = _re.sub(r"\D", "", doctor_phone)
                 dr = await db.execute(
                     select(Doctor).where(
                         Doctor.clinic_id == clinic_id,
-                        Doctor.whatsapp_number == doctor_phone,
                         Doctor.is_active == True,
+                        or_(
+                            Doctor.whatsapp_number == f"+{digits}",
+                            Doctor.whatsapp_number == digits,
+                        ),
                     )
                 )
                 dr_row = dr.scalar_one_or_none()
                 if dr_row:
                     doctor_id = dr_row.id
+                    resolved_doctor_name = dr_row.name
 
             # Parse SOAP note
             soap = soap_result.get("soap_note") or {}
@@ -134,6 +144,7 @@ async def save_consultation_record(
                 patient_id=patient_id,
                 clinic_id=clinic_id,
                 doctor_id=doctor_id,
+                doctor_name=resolved_doctor_name,
                 visit_date=datetime.utcnow(),
                 record_type="consultation",
                 chief_complaint=chief_complaint,

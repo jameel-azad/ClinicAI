@@ -50,15 +50,23 @@ export interface Doctor {
   whatsapp_number: string;
   working_hours_start: number;
   working_hours_end: number;
-  appointment_duration: number;
+  appointment_duration_minutes: number;
   buffer_minutes: number;
+  is_active: boolean;
   google_calendar_id?: string | null;
 }
 
 export interface ModelConfig {
-  vendor: string;
-  model: string;
-  api_key: string;
+  id?: string;
+  clinic_id?: string;
+  llm_vendor: string;
+  llm_model: string;
+  stt_vendor?: string;
+  stt_model?: string;
+  groq_api_key_set?: boolean;
+  anthropic_api_key_set?: boolean;
+  openai_api_key_set?: boolean;
+  google_api_key_set?: boolean;
 }
 
 export interface ModelConfigUpdatePayload {

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { CircleCheckIcon, ExternalLinkIcon } from "lucide-react";
 
 import { useMe } from "@/hooks/useMe";
+import { useDoctors } from "@/hooks/useDoctors";
+import { useModelConfig } from "@/hooks/useModelConfig";
 import { Button } from "@/components/ui/button";
 
 function extractWhatsAppNumber(raw: string | undefined): string | null {
@@ -14,9 +16,12 @@ function extractWhatsAppNumber(raw: string | undefined): string | null {
 }
 
 export default function DonePage() {
-  const { data: me, isLoading } = useMe();
+  const { data: me, isLoading: meLoading } = useMe();
+  const clinicId = me?.clinic?.id;
+  const { data: doctors } = useDoctors(clinicId);
+  const { data: modelConfig } = useModelConfig(clinicId);
 
-  if (isLoading) {
+  if (meLoading) {
     return (
       <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
         Loading…
@@ -25,9 +30,9 @@ export default function DonePage() {
   }
 
   const clinic = me?.clinic;
-  const doctorCount = me?.doctors?.length ?? 0;
-  const modelLabel = me?.model_config
-    ? `${me.model_config.vendor} / ${me.model_config.model}`
+  const doctorCount = doctors?.length ?? 0;
+  const modelLabel = modelConfig
+    ? `${modelConfig.llm_vendor} / ${modelConfig.llm_model}`
     : "Not configured";
 
   const waDigits = extractWhatsAppNumber(clinic?.twilio_whatsapp_number);

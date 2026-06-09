@@ -47,6 +47,8 @@ async def handle_doctor_voice_note(
     doctor_number: str,
     doctor_name: str | None = None,
     caption: str = "",
+    llm_enc_key: str | None = None,
+    stt_enc_key: str | None = None,
 ) -> str:
     if not _is_supported_audio(media_content_type):
         return "I received media from the doctor, but it was not a supported audio voice note."
@@ -67,6 +69,8 @@ async def handle_doctor_voice_note(
             audio_path=audio_path,
             doctor_name=doctor_name,
             patient_hint=_patient_hint_from_caption(caption),
+            llm_enc_key=llm_enc_key,
+            stt_enc_key=stt_enc_key,
         )
         print(f"[Scribe] Pipeline done. errors={result.get('errors', [])}")
 
@@ -80,7 +84,7 @@ async def handle_doctor_voice_note(
             return f"I transcribed the voice note, but could not generate the PDF. {warnings}".strip()
 
         document_id, stored_pdf = store_scribe_pdf(pdf_path)
-        patient_number = _resolve_patient_number(result, doctor_name, caption)
+        patient_number = _resolve_patient_number(result, doctor_name, caption, doctor_number)
         patient_name = _patient_name(result)
 
         # Store pending prescription — doctor must approve before it reaches the patient
@@ -93,6 +97,7 @@ async def handle_doctor_voice_note(
             "patient_number": patient_number,
             "patient_name": patient_name,
             "doctor_number": doctor_number,
+            "doctor_name": doctor_name or "",
             "follow_up_questions": follow_up_questions,
             "follow_up_days": follow_up_days,
             # Stored for REGEN support — allows re-running pipeline without re-transcribing audio
@@ -236,22 +241,44 @@ def _run_scribe_pipeline(
     audio_path: str,
     doctor_name: str | None,
     patient_hint: str | None,
+    llm_enc_key: str | None = None,
+    stt_enc_key: str | None = None,
 ) -> ScribeState:
     initial_state: ScribeState = {
         "audio_path": audio_path,
         "doctor_name": doctor_name,
         "patient_name": patient_hint,
         "clinic_name": os.getenv("CLINIC_NAME", "ClinicAI"),
+        "llm_enc_key": llm_enc_key,
+        "stt_enc_key": stt_enc_key,
         "errors": [],
     }
     return scribe_pipeline.invoke(initial_state)
 
 
-def _resolve_patient_number(result: ScribeState, doctor_name: str | None, caption: str) -> str | None:
+def _resolve_patient_number(
+    result: ScribeState,
+    doctor_name: str | None,
+    caption: str,
+    doctor_number: str | None = None,
+) -> str | None:
+    # 1. Explicit number in voice note caption (highest priority)
     number_from_caption = _patient_number_from_caption(caption)
     if number_from_caption:
         return number_from_caption
 
+    # 2. Doctor's active reply context — set when a patient sends a follow-up
+    #    or lab report. This is the most reliable link to the current patient.
+    if doctor_number:
+        try:
+            from app.services.store import get_doctor_reply_context
+            ctx = get_doctor_reply_context(doctor_number)
+            if ctx and ctx.get("patient_number"):
+                return ctx["patient_number"]
+        except Exception:
+            pass
+
+    # 3. Match by patient name against confirmed appointments
     patient_name = _patient_name(result)
     appointments = list(all_appointments().values())
     if doctor_name:

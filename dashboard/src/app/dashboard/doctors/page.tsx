@@ -7,9 +7,10 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import { Plus, Pencil, UserX, Users, Info } from "lucide-react"
 
-import api from "../../../../lib/api"
-import { useMe, useDoctors } from "../../../../lib/hooks"
-import { Doctor } from "../../../../types"
+import api from "@/lib/api"
+import { useMe } from "@/hooks/useMe"
+import { useDoctors } from "@/hooks/useDoctors"
+import type { Doctor } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -459,7 +460,7 @@ function formatHour(h: number): string {
 
 export default function DoctorsPage() {
   const { data: me } = useMe()
-  const clinicId = me?.clinic_id ?? ""
+  const clinicId = me?.clinic?.id ?? ""
   const { data: doctors, isLoading } = useDoctors(clinicId)
 
   return (

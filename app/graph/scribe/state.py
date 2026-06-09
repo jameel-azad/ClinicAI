@@ -20,6 +20,9 @@ class ScribeState(TypedDict, total=False):
     doctor_name: Optional[str]
     patient_name: Optional[str]
     clinic_name: Optional[str]
+    # Per-clinic API keys (encrypted); None → fall back to env vars
+    llm_enc_key: Optional[str]
+    stt_enc_key: Optional[str]
     transcript: str
     language_detected: str
     soap_note: dict

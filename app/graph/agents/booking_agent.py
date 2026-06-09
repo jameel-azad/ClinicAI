@@ -30,10 +30,13 @@ _CLINIC_NAME = os.getenv("CLINIC_NAME", "ClinicAI")
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _groq_llm():
-    return ChatGroq(
-        api_key=os.getenv("GROQ_API_KEY"),
-        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+def _make_llm(vendor: str = "groq", model: str = None, enc_key: str = None):
+    """Build a LangChain LLM using per-clinic config, falling back to env vars."""
+    from app.services.llm_factory import get_llm_for_vendor
+    return get_llm_for_vendor(
+        vendor,
+        model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        enc_key,
         temperature=0.1,
         max_tokens=150,
     )
@@ -157,9 +160,15 @@ MSG_SYMPTOM_TO_BOOKING = (
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _extract_booking_entities(message: str, context: str = "") -> dict:
+def _extract_booking_entities(
+    message: str,
+    context: str = "",
+    vendor: str = "groq",
+    model: str = None,
+    enc_key: str = None,
+) -> dict:
     try:
-        llm = _groq_llm()
+        llm = _make_llm(vendor, model, enc_key)
         prompt = BOOKING_ENTITY_PROMPT
         if context:
             prompt = f"REFERENCE APPOINTMENT CONTEXT: {context}\n\n" + prompt
@@ -580,7 +589,13 @@ def reschedule_node(state: BookingState) -> dict:
             f"'same day'/'usi din'/'same date' means {session.requested_date}. "
             f"'same time'/'usi time' means {session.requested_time}."
         )
-        entities = _extract_booking_entities(message, context=appt_context)
+        entities = _extract_booking_entities(
+            message,
+            context=appt_context,
+            vendor=state.get("llm_vendor", "groq"),
+            model=state.get("llm_model"),
+            enc_key=state.get("llm_enc_key"),
+        )
         new_date = entities.get("requested_date") or session.new_requested_date
         new_time = entities.get("requested_time") or session.new_requested_time
         session.new_requested_date = new_date

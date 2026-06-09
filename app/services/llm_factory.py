@@ -142,25 +142,64 @@ async def _call_google(api_key: str, model: str, prompt: str) -> str:
         r.raise_for_status()
         return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-def get_llm_for_vendor(vendor: str, model: str, enc_key: Optional[str] = None):
-    """Return a LangChain chat model. Provider packages are lazy-imported."""
+def get_llm_for_vendor(
+    vendor: str,
+    model: str,
+    enc_key: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = 512,
+):
+    """Return a LangChain chat model for the given vendor.
+
+    Falls back to the corresponding env-var key when enc_key is None or
+    decryption fails, so system-level defaults always work even when a clinic
+    has not configured its own key yet.
+    """
     api_key: Optional[str]
-    if vendor == "anthropic":
-        from langchain_anthropic import ChatAnthropic  # pip install langchain-anthropic
+    v = (vendor or "groq").lower()
+
+    if v == "anthropic":
+        from langchain_anthropic import ChatAnthropic
         api_key = (decrypt_api_key(enc_key) if enc_key else None) or os.getenv("ANTHROPIC_API_KEY")
-        return ChatAnthropic(model=model, api_key=api_key)
-    elif vendor == "openai":
-        from langchain_openai import ChatOpenAI  # pip install langchain-openai
+        if not api_key:
+            raise ValueError("No Anthropic API key available (clinic config or ANTHROPIC_API_KEY env var)")
+        return ChatAnthropic(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens)
+
+    elif v == "openai":
+        from langchain_openai import ChatOpenAI
         api_key = (decrypt_api_key(enc_key) if enc_key else None) or os.getenv("OPENAI_API_KEY")
-        return ChatOpenAI(model=model, api_key=api_key)
-    elif vendor == "google":
+        if not api_key:
+            raise ValueError("No OpenAI API key available (clinic config or OPENAI_API_KEY env var)")
+        return ChatOpenAI(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens)
+
+    elif v in ("google", "gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
         api_key = (decrypt_api_key(enc_key) if enc_key else None) or os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY"))
-        return ChatGoogleGenerativeAI(model=model, google_api_key=api_key)
+        if not api_key:
+            raise ValueError("No Google API key available (clinic config or GEMINI_API_KEY env var)")
+        return ChatGoogleGenerativeAI(
+            model=model, google_api_key=api_key,
+            temperature=temperature, max_output_tokens=max_tokens,
+        )
+
     else:  # groq (default)
         from langchain_groq import ChatGroq
         api_key = (decrypt_api_key(enc_key) if enc_key else None) or os.getenv("GROQ_API_KEY")
-        return ChatGroq(model=model, api_key=api_key)
+        if not api_key:
+            raise ValueError("No Groq API key available (clinic config or GROQ_API_KEY env var)")
+        return ChatGroq(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens)
+
+
+def get_groq_client(enc_key: Optional[str] = None):
+    """Return a raw Groq client using the clinic-specific key or the env fallback.
+
+    Used for Whisper STT transcription which calls the Groq audio API directly.
+    """
+    from groq import Groq
+    api_key = (decrypt_api_key(enc_key) if enc_key else None) or os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("No Groq API key available (clinic config or GROQ_API_KEY env var)")
+    return Groq(api_key=api_key)
 
 
 def get_default_llm():

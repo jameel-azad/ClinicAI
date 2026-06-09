@@ -7,8 +7,9 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import { CheckCircle2, XCircle, Eye, EyeOff, Zap } from "lucide-react"
 
-import api from "../../../../lib/api"
-import { useMe, useModelConfig } from "../../../../lib/hooks"
+import api from "@/lib/api"
+import { useMe } from "@/hooks/useMe"
+import { useModelConfig } from "@/hooks/useModelConfig"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -407,7 +408,7 @@ function TestConnectionButton({ clinicId }: { clinicId: string }) {
 
 export default function ConfigPage() {
   const { data: me } = useMe()
-  const clinicId = me?.clinic_id ?? ""
+  const clinicId = me?.clinic?.id ?? ""
   const { data: config, isLoading } = useModelConfig(clinicId)
 
   const vendors: { name: string; keySet: boolean }[] = [

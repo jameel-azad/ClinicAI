@@ -163,20 +163,28 @@ def _build_consultation_context(record: dict) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-def _analyze_followup_query(incoming: str, record: dict) -> dict:
+def _analyze_followup_query(
+    incoming: str,
+    record: dict,
+    vendor: str = "groq",
+    model: str = None,
+    enc_key: str = None,
+) -> dict:
     """Call the LLM to decide: answer directly or escalate to doctor.
 
     Returns dict with keys: can_answer (bool), answer (str), confidence (float).
     Falls back to escalate=True on any error.
     """
     try:
-        from langchain_groq import ChatGroq
         from langchain_core.messages import SystemMessage, HumanMessage
+        from app.services.llm_factory import get_llm_for_vendor
 
-        llm = ChatGroq(
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=0,
-            groq_api_key=os.getenv("GROQ_API_KEY"),
+        llm = get_llm_for_vendor(
+            vendor,
+            model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            enc_key,
+            temperature=0.0,
+            max_tokens=512,
         )
         context = _build_consultation_context(record)
         human_content = (
@@ -188,7 +196,6 @@ def _analyze_followup_query(incoming: str, record: dict) -> dict:
             HumanMessage(content=human_content),
         ])
         raw = response.content.strip()
-        # Strip markdown code fences if present
         raw = _re.sub(r"^```(?:json)?\s*", "", raw, flags=_re.MULTILINE)
         raw = _re.sub(r"\s*```$", "", raw, flags=_re.MULTILINE)
         result = json.loads(raw)
@@ -251,7 +258,12 @@ def followup_node(state: BookingState) -> dict:
         record = _fetch_consultation_sync(session_dict.get("clinic_id"), from_number)
 
         if record and not _mentions_report(incoming):
-            analysis = _analyze_followup_query(incoming, record)
+            analysis = _analyze_followup_query(
+                incoming, record,
+                vendor=state.get("llm_vendor", "groq"),
+                model=state.get("llm_model"),
+                enc_key=state.get("llm_enc_key"),
+            )
             if analysis["can_answer"] and analysis["confidence"] >= 0.75 and analysis["answer"]:
                 return {
                     "reply_message": analysis["answer"],

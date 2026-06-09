@@ -49,6 +49,7 @@ class PatientSummary(BaseModel):
     blood_group: Optional[str]
     last_visit_at: Optional[datetime]
     record_count: int
+    last_doctor: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -136,7 +137,9 @@ async def _record_count_for_patient(patient_id: str, db: AsyncSession) -> int:
     return result.scalar_one()
 
 
-def _build_patient_summary(patient: Patient, record_count: int) -> PatientSummary:
+def _build_patient_summary(
+    patient: Patient, record_count: int, last_doctor: str | None = None
+) -> PatientSummary:
     return PatientSummary(
         id=patient.id,
         phone_number=patient.phone_number,
@@ -146,6 +149,7 @@ def _build_patient_summary(patient: Patient, record_count: int) -> PatientSummar
         blood_group=patient.blood_group,
         last_visit_at=patient.last_visit_at,
         record_count=record_count,
+        last_doctor=last_doctor,
     )
 
 
@@ -201,11 +205,12 @@ async def list_patients(
     result = await db.execute(query)
     patients = result.scalars().all()
 
-    # Fetch record counts in a single query
     if not patients:
         return []
 
     patient_ids = [p.id for p in patients]
+
+    # Fetch record counts in a single query
     counts_result = await db.execute(
         select(MedicalRecord.patient_id, func.count().label("cnt"))
         .where(MedicalRecord.patient_id.in_(patient_ids))
@@ -213,8 +218,34 @@ async def list_patients(
     )
     count_map: Dict[str, int] = {row.patient_id: row.cnt for row in counts_result}
 
+    # Fetch most recent doctor per patient using an outer join so records with
+    # doctor_id=null but doctor_name set (text fallback) are still included.
+    ranked_sq = (
+        select(
+            MedicalRecord.patient_id,
+            func.coalesce(Doctor.name, MedicalRecord.doctor_name).label("doctor_name"),
+            func.row_number()
+            .over(
+                partition_by=MedicalRecord.patient_id,
+                order_by=MedicalRecord.visit_date.desc(),
+            )
+            .label("rn"),
+        )
+        .outerjoin(Doctor, Doctor.id == MedicalRecord.doctor_id)
+        .where(
+            MedicalRecord.patient_id.in_(patient_ids),
+            func.coalesce(Doctor.name, MedicalRecord.doctor_name).isnot(None),
+        )
+        .subquery()
+    )
+    doctor_result = await db.execute(
+        select(ranked_sq.c.patient_id, ranked_sq.c.doctor_name)
+        .where(ranked_sq.c.rn == 1)
+    )
+    doctor_map: Dict[str, str] = {row.patient_id: row.doctor_name for row in doctor_result}
+
     return [
-        _build_patient_summary(p, count_map.get(p.id, 0))
+        _build_patient_summary(p, count_map.get(p.id, 0), doctor_map.get(p.id))
         for p in patients
     ]
 
@@ -327,7 +358,7 @@ async def list_patient_records(
     await _get_patient_or_404(patient_id, clinic_id, db)
 
     query = (
-        select(MedicalRecord, Doctor.name.label("doctor_name"))
+        select(MedicalRecord, func.coalesce(Doctor.name, MedicalRecord.doctor_name).label("doctor_name"))
         .outerjoin(Doctor, MedicalRecord.doctor_id == Doctor.id)
         .where(
             MedicalRecord.patient_id == patient_id,

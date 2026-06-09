@@ -24,15 +24,19 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _groq_client() -> Groq:
-    return Groq(api_key=os.getenv("GROQ_API_KEY"))
+def _groq_client(enc_key: str = None) -> Groq:
+    from app.services.llm_factory import get_groq_client
+    return get_groq_client(enc_key)
 
 
-def _llm() -> ChatGroq:
-    return ChatGroq(
-        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+def _llm(enc_key: str = None) -> ChatGroq:
+    from app.services.llm_factory import get_llm_for_vendor
+    return get_llm_for_vendor(
+        "groq",
+        os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        enc_key,
         temperature=0,
-        groq_api_key=os.getenv("GROQ_API_KEY"),
+        max_tokens=4096,
     )
 
 
@@ -105,8 +109,8 @@ def transcribe_node(state: ScribeState) -> dict:
     errors = list(state.get("errors", []))
 
     try:
-        client = _groq_client()
-        model = os.getenv("WHISPER_MODEL", "whisper-large-v3")
+        client = _groq_client(state.get("stt_enc_key"))
+        model = state.get("stt_model") or os.getenv("WHISPER_MODEL", "whisper-large-v3")
 
         with open(audio_path, "rb") as audio_file:
             response = client.audio.transcriptions.create(
@@ -250,7 +254,7 @@ def soap_generator_node(state: ScribeState) -> dict:
                 print(f"[soap_gen] Retry attempt {attempt + 1} after delay...")
                 time.sleep(3)
 
-            llm = _llm()
+            llm = _llm(state.get("llm_enc_key"))
             messages = [
                 SystemMessage(content=SOAP_SYSTEM),
                 HumanMessage(content=f"Doctor's voice note transcript:\n\n{transcript}"),

@@ -19,7 +19,18 @@ def handle_soap_button_reply(button_payload: str, doctor_number: str) -> str | N
 
     soap_id = soap.get("soap_id", "")
     if payload == "soap_approve":
-        return _approve(soap_id, None)
+        # If the SOAP has no patient number, try the doctor's active reply context
+        # as a fallback before asking the doctor to type it manually.
+        override = None
+        if not soap.get("patient_number"):
+            try:
+                from app.services.store import get_doctor_reply_context
+                ctx = get_doctor_reply_context(doctor_number)
+                if ctx and ctx.get("patient_number"):
+                    override = ctx["patient_number"]
+            except Exception:
+                pass
+        return _approve(soap_id, override)
     return _reject(soap_id)
 
 
@@ -254,6 +265,7 @@ def _save_consultation_record(soap: dict, patient_number: str, patient_name: str
             doctor_phone=soap.get("doctor_number"),
             chief_complaint=None,
             soap_result=soap_result,
+            doctor_name_hint=soap.get("doctor_name"),
         ))
     except Exception as exc:
         print(f"[SOAP] Could not save consultation record: {exc}")

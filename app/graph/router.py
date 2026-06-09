@@ -140,6 +140,10 @@ def intent_node(state: BookingState) -> dict:
         "llm_error": None, "all_intents": [], "is_multi_intent": False,
         "is_injection": False, "injection_reason": None,
         "is_emergency": False, "pipeline_log": [],
+        # Per-clinic LLM config forwarded from BookingState
+        "llm_vendor":  state.get("llm_vendor", "groq"),
+        "llm_model":   state.get("llm_model",  os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")),
+        "llm_enc_key": state.get("llm_enc_key"),
     }
     result = classifier_graph.invoke(initial)
 
@@ -198,7 +202,7 @@ def _invoke_sub_agent(graph, state: BookingState) -> dict:
     sub_input = {
         "from_number": state["from_number"],
         "incoming_message": state["incoming_message"],
-        "messages": state.get("messages") or [],   # pass conversation history for multi-turn context
+        "messages": state.get("messages") or [],
         "intent": state.get("intent", "general_query"),
         "confidence": state.get("confidence", 0.0),
         "extracted_entities": state.get("extracted_entities", {}),
@@ -210,6 +214,13 @@ def _invoke_sub_agent(graph, state: BookingState) -> dict:
         "appointment_id": state.get("appointment_id"),
         "is_off_topic": False,
         "pipeline_log": [],
+        # Clinic + LLM context — sub-agents need these to use clinic-specific keys
+        "clinic_id":   state.get("clinic_id"),
+        "llm_vendor":  state.get("llm_vendor", "groq"),
+        "llm_model":   state.get("llm_model",  os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")),
+        "llm_enc_key": state.get("llm_enc_key"),
+        "stt_model":   state.get("stt_model"),
+        "stt_enc_key": state.get("stt_enc_key"),
     }
     return graph.invoke(sub_input)
 

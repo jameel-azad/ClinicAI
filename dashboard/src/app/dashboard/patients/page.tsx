@@ -35,6 +35,7 @@ interface PatientSummary {
   gender: string | null
   last_visit_at: string | null
   record_count: number
+  last_doctor: string | null
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ function TableSkeletonRows() {
     <>
       {Array.from({ length: 5 }).map((_, i) => (
         <TableRow key={i}>
-          {Array.from({ length: 5 }).map((__, j) => (
+          {Array.from({ length: 6 }).map((__, j) => (
             <TableCell key={j}>
               <Skeleton className="h-4 w-full" />
             </TableCell>
@@ -196,6 +197,7 @@ export default function PatientsPage() {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Phone</TableHead>
+                  <TableHead>Doctor</TableHead>
                   <TableHead>Last Visit</TableHead>
                   <TableHead>Total Records</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -221,6 +223,7 @@ export default function PatientsPage() {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Phone</TableHead>
+                  <TableHead>Doctor</TableHead>
                   <TableHead>Last Visit</TableHead>
                   <TableHead>Total Records</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -234,6 +237,11 @@ export default function PatientsPage() {
                     </TableCell>
                     <TableCell className="font-mono text-xs">
                       {patient.phone_number}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {patient.last_doctor ?? (
+                        <span className="text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatDate(patient.last_visit_at)}

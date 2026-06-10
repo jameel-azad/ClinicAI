@@ -163,6 +163,7 @@ class BookingSession(BaseModel):
     new_requested_time: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     last_bot_response: Optional[str] = None    # for context-aware classification
     clinic_id: Optional[str] = None            # resolved from the Twilio "to" number
+    clinic_twilio_number: Optional[str] = None  # clinic's own WhatsApp number — used as From in outbound messages
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -197,6 +198,7 @@ class BookingState(TypedDict):
     pipeline_log: Annotated[list[str], operator.add]
     # ── Clinic context — resolved from Twilio "To" number in webhook ─────────
     clinic_id: Optional[str]
+    clinic_twilio_number: Optional[str]  # clinic's own WhatsApp number — used as From in outbound messages
     clinic_open_hour: int
     clinic_close_hour: int
     clinic_closed: bool   # set by after_hours_check_node; only defers doctor-facing messages
@@ -225,6 +227,7 @@ class ConsultationSession(BaseModel):
     doctor_number: str
     doctor_name: str
     clinic_id: Optional[str] = None         # isolates sessions per clinic (multi-tenant)
+    clinic_twilio_number: Optional[str] = None  # clinic's own WhatsApp number — used as From in outbound messages
     appointment_id: Optional[str] = None
     messages: list[ConsultationMessage] = Field(default_factory=list)
     audio_files: list[dict] = Field(default_factory=list)   # {url, duration_secs} for Jameel bundle

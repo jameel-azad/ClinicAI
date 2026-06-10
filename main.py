@@ -86,6 +86,30 @@ async def lifespan(app: FastAPI):
     except Exception as _exc:
         print(f"  [WARN] DB doctor sync failed: {_exc}")
 
+    # ── Verify WhatsApp Content Template approval status ──────────────────
+    try:
+        from app.services.whatsapp import check_content_template_approval
+        _template_checks = {
+            "APPOINTMENT_APPROVAL": os.getenv("APPOINTMENT_APPROVAL_CONTENT_SID", "").strip(),
+            "SOAP_APPROVAL": os.getenv("SOAP_APPROVAL_CONTENT_SID", "").strip(),
+        }
+        for _name, _csid in _template_checks.items():
+            if not _csid:
+                continue
+            _status = await check_content_template_approval(_csid)
+            if _status == "approved":
+                print(f"  Template {_name} ({_csid[:12]}...): APPROVED ✓")
+            elif _status == "unknown":
+                print(f"  Template {_name} ({_csid[:12]}...): status unknown (check Twilio console)")
+            else:
+                print(
+                    f"  [WARN] Template {_name} ({_csid[:12]}...): status={_status.upper()} — "
+                    "messages to doctors will be UNDELIVERED until approved by WhatsApp/Meta. "
+                    "Go to Twilio Console → Content Template Builder → Submit for approval."
+                )
+    except Exception as _exc:
+        print(f"  [WARN] Template approval check failed: {_exc}")
+
     if scheduler is not None:
         if not getattr(scheduler, "running", False):
             scheduler.start()

@@ -185,9 +185,10 @@ async def twilio_webhook(
 
     # Resolve clinic from Twilio "To" number — gives us per-clinic hours + model config
     clinic = await _resolve_clinic(To, db)
-    clinic_id         = clinic.id          if clinic else None
-    clinic_open_hour  = clinic.open_hour   if clinic else _DEFAULT_OPEN_HOUR
-    clinic_close_hour = clinic.close_hour  if clinic else _DEFAULT_CLOSE_HOUR
+    clinic_id            = clinic.id             if clinic else None
+    clinic_twilio_number = clinic.twilio_number  if clinic else None
+    clinic_open_hour     = clinic.open_hour      if clinic else _DEFAULT_OPEN_HOUR
+    clinic_close_hour    = clinic.close_hour     if clinic else _DEFAULT_CLOSE_HOUR
 
     model_cfg = await _resolve_model_config(clinic_id, db)
     llm_fields = _build_llm_state_fields(model_cfg)
@@ -224,6 +225,7 @@ async def twilio_webhook(
                 caption=message_text,
                 llm_enc_key=llm_fields.get("llm_enc_key"),
                 stt_enc_key=llm_fields.get("stt_enc_key"),
+                clinic_twilio_number=clinic_twilio_number,
             )
         else:
             reply = handle_doctor_message(
@@ -231,6 +233,7 @@ async def twilio_webhook(
                 identity.display_name,
                 identity.phone_number,
                 button_payload=ButtonPayload,
+                clinic_twilio_number=clinic_twilio_number,
             )
     elif (
         NumMedia != "0"
@@ -244,6 +247,7 @@ async def twilio_webhook(
         reply = await handle_incoming_pdf(
             MediaUrl0, from_number,
             llm_enc_key=llm_fields.get("llm_enc_key"),
+            clinic_twilio_number=clinic_twilio_number,
         )
     else:
         config = {"configurable": {"thread_id": from_number}}
@@ -251,6 +255,7 @@ async def twilio_webhook(
             "from_number": from_number,
             "incoming_message": message_text,
             "clinic_id": clinic_id,
+            "clinic_twilio_number": clinic_twilio_number,
             "clinic_open_hour": clinic_open_hour,
             "clinic_close_hour": clinic_close_hour,
             **llm_fields,
@@ -300,7 +305,7 @@ async def twilio_webhook(
             )
 
     if reply:
-        await send_whatsapp_message_async(to=from_number, body=reply)
+        await send_whatsapp_message_async(to=from_number, body=reply, from_number=clinic_twilio_number)
 
 
 async def _invoke_router_graph(

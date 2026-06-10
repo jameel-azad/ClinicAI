@@ -46,6 +46,7 @@ async def send_approval_request_to_doctor(
     time_str: str,
     symptoms: str,
     doctor_name: str = "",
+    clinic_twilio_number: str | None = None,
 ) -> bool:
     content_sid = os.getenv("APPOINTMENT_APPROVAL_CONTENT_SID", "").strip()
     if content_sid:
@@ -53,13 +54,13 @@ async def send_approval_request_to_doctor(
             doctor_number,
             content_sid,
             {
-                "1": approval_id,
-                "2": patient_name,
-                "3": doctor_name or "Doctor",
-                "4": date_str,
-                "5": time_str,
-                "6": symptoms or "Not specified",
+                "1": patient_name,
+                "2": doctor_name or "Doctor",
+                "3": date_str,
+                "4": time_str,
+                "5": symptoms or "Not specified",
             },
+            from_number=clinic_twilio_number,
         )
     # Fallback: plain text with button list
     body = (
@@ -74,7 +75,7 @@ async def send_approval_request_to_doctor(
         {"id": f"reject_{approval_id}", "title": "❌ Reject"},
         {"id": f"suggest_{approval_id}", "title": "🕐 Suggest Time"},
     ]
-    return await send_whatsapp_interactive_buttons(doctor_number, body, buttons)
+    return await send_whatsapp_interactive_buttons(doctor_number, body, buttons, from_number=clinic_twilio_number)
 
 
 def send_approval_request_sync(
@@ -85,13 +86,15 @@ def send_approval_request_sync(
     time_str: str,
     symptoms: str,
     doctor_name: str = "",
+    clinic_twilio_number: str | None = None,
 ) -> bool:
     import logging
     logger = logging.getLogger(__name__)
     try:
         result = asyncio.run(
             send_approval_request_to_doctor(
-                doctor_number, approval_id, patient_name, date_str, time_str, symptoms, doctor_name
+                doctor_number, approval_id, patient_name, date_str, time_str, symptoms,
+                doctor_name, clinic_twilio_number,
             )
         )
         if not result:
@@ -104,7 +107,8 @@ def send_approval_request_sync(
                 future = pool.submit(
                     asyncio.run,
                     send_approval_request_to_doctor(
-                        doctor_number, approval_id, patient_name, date_str, time_str, symptoms, doctor_name
+                        doctor_number, approval_id, patient_name, date_str, time_str, symptoms,
+                        doctor_name, clinic_twilio_number,
                     ),
                 )
                 return future.result(timeout=20)
@@ -257,6 +261,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         "time_str": session.requested_time,
         "symptoms": session.symptoms,
         "clinic_id": session.clinic_id,
+        "clinic_twilio_number": session.clinic_twilio_number,
         "status": "waiting_doctor",
     }
     save_pending_approval(approval)
@@ -270,6 +275,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         session.requested_time,
         _format_symptoms(session.symptoms),
         session.doctor_name or "",
+        clinic_twilio_number=session.clinic_twilio_number,
     )
     print(f"[Approval] Message sent={sent} to doctor {doctor_number}")
 
@@ -497,12 +503,14 @@ def _approve(approval: dict) -> str:
         google_calendar_event_id=google_event_id,
     )
 
+    clinic_twilio_number = approval.get("clinic_twilio_number")
     schedule_reminder(
         to=appt.from_number,
         appointment_id=appointment_id,
         doctor=appt.doctor_name,
         date_str=appt.date_str,
         time_str=appt.time_str,
+        clinic_twilio_number=clinic_twilio_number,
     )
 
     from app.services.scheduler import schedule_no_show_check
@@ -511,6 +519,7 @@ def _approve(approval: dict) -> str:
         appointment_id=appointment_id,
         date_str=appt.date_str,
         time_str=appt.time_str,
+        clinic_twilio_number=clinic_twilio_number,
     )
 
     clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
@@ -523,6 +532,7 @@ def _approve(approval: dict) -> str:
             f"Time: {appt.time_str}\n\n"
             "Please arrive 5–10 minutes early. Reply if you need to reschedule."
         ),
+        from_number=clinic_twilio_number,
     )
 
     return f"Approved {appointment_id}. I have confirmed the appointment with the patient."
@@ -537,6 +547,7 @@ def _reject(approval: dict) -> str:
             f"❌ *{approval.get('doctor_name') or 'The doctor'}* could not approve that slot.\n\n"
             "Please send another preferred date and time and we'll find you a new slot."
         ),
+        from_number=approval.get("clinic_twilio_number"),
     )
     return f"Rejected {approval_id}. I have asked the patient for another slot."
 

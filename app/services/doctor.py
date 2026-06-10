@@ -24,6 +24,7 @@ def handle_doctor_message(
     doctor_name: str | None = None,
     doctor_number: str | None = None,
     button_payload: str = "",
+    clinic_twilio_number: str | None = None,
 ) -> str:
     text = message.strip().lower()
     name = doctor_name or "Doctor"
@@ -39,7 +40,7 @@ def handle_doctor_message(
 
     # CLOSE command — doctor explicitly ends a patient's follow-up session
     if doctor_number:
-        close_reply = _handle_close_session(message, doctor_number, name)
+        close_reply = _handle_close_session(message, doctor_number, name, clinic_twilio_number)
         if close_reply:
             return close_reply
 
@@ -54,7 +55,7 @@ def handle_doctor_message(
             return setup_reply
 
     if doctor_number:
-        lab_reply = _handle_lab_review_ack(message, doctor_number, name)
+        lab_reply = _handle_lab_review_ack(message, doctor_number, name, clinic_twilio_number)
         if lab_reply:
             return lab_reply
 
@@ -65,7 +66,7 @@ def handle_doctor_message(
 
     # MSG +91NUMBER message  — forward a reply to a patient
     if doctor_number:
-        msg_reply = _handle_patient_msg(message, name)
+        msg_reply = _handle_patient_msg(message, name, clinic_twilio_number)
         if msg_reply:
             return msg_reply
 
@@ -83,7 +84,7 @@ def handle_doctor_message(
 
     # If doctor has an active reply context, silently forward freetext to that patient
     if doctor_number:
-        ctx_reply = _handle_context_reply(message, doctor_number, name, text)
+        ctx_reply = _handle_context_reply(message, doctor_number, name, text, clinic_twilio_number)
         if ctx_reply:
             return ctx_reply
 
@@ -94,7 +95,7 @@ def handle_doctor_message(
     )
 
 
-def _handle_patient_msg(message: str, doctor_name: str) -> str | None:
+def _handle_patient_msg(message: str, doctor_name: str, clinic_twilio_number: str | None = None) -> str | None:
     """
     Handle: MSG +91XXXXXXXXXX your reply text
     Forwards the doctor's freetext reply directly to a patient.
@@ -120,13 +121,13 @@ def _handle_patient_msg(message: str, doctor_name: str) -> str | None:
         return "Please include a message after the number. Example: *MSG +91NUMBER Hi, please take rest.*"
 
     outbound = f"📩 *Dr. {_strip_dr(doctor_name)}:* {patient_text}"
-    sent = send_whatsapp_message_sync(patient_number, outbound)
+    sent = send_whatsapp_message_sync(patient_number, outbound, from_number=clinic_twilio_number)
     if sent:
         return f"✅ Message sent to {patient_number}."
     return f"⚠️ Could not send message to {patient_number}. Please try again."
 
 
-def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, text_lower: str) -> str | None:
+def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, text_lower: str, clinic_twilio_number: str | None = None) -> str | None:
     """
     If the doctor has an active reply context (a patient just messaged them),
     silently forward their freetext to that patient — no command needed.
@@ -147,7 +148,7 @@ def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, te
         return None
 
     outbound = f"📩 *Dr. {_strip_dr(doctor_name)}:* {message.strip()}"
-    sent = send_whatsapp_message_sync(patient_number, outbound)
+    sent = send_whatsapp_message_sync(patient_number, outbound, from_number=clinic_twilio_number)
     if sent:
         pop_doctor_reply_context(doctor_number, patient_number)
         return f"✅ Sent to {patient_name}."
@@ -202,7 +203,7 @@ def _format_today_appointments() -> str:
     return "\n".join(lines)
 
 
-def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str) -> str | None:
+def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str, clinic_twilio_number: str | None = None) -> str | None:
     """Handle doctor saying 'OK LAB123' — notifies the patient."""
     from app.services.whatsapp import send_whatsapp_message_sync
 
@@ -223,6 +224,7 @@ def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str) -
             patient_number,
             f"✅ Dr. {_strip_dr(doctor_name)} has reviewed your lab report and acknowledged it. "
             "If you have any concerns, feel free to reach out.",
+            from_number=clinic_twilio_number,
         )
 
     delete_pending_lab_review(lab_id)
@@ -230,7 +232,7 @@ def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str) -
     return f"✅ Acknowledged. {patient_name.capitalize()} has been notified."
 
 
-def _handle_close_session(message: str, doctor_number: str, doctor_name: str) -> str | None:
+def _handle_close_session(message: str, doctor_number: str, doctor_name: str, clinic_twilio_number: str | None = None) -> str | None:
     """Handle CLOSE command — doctor explicitly ends a patient's follow-up session.
 
     Accepts:
@@ -298,6 +300,7 @@ def _handle_close_session(message: str, doctor_number: str, doctor_name: str) ->
         f"Your consultation records have been saved. 😊\n\n"
         f"Feel free to reach out anytime to book a new appointment. Take care! 🙏\n"
         f"— {clinic_name}",
+        from_number=clinic_twilio_number,
     )
 
     return f"✅ Session closed for *{patient_name}*. They've been notified and their session has been reset."

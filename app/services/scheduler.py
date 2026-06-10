@@ -131,7 +131,7 @@ def _resolve_appointment_datetime(date_str: str, time_str: str) -> datetime | No
 
 # ── Reminder job ───────────────────────────────────────────────────────────────
 
-def _send_reminder_job(to: str, appointment_id: str, doctor: str, date_str: str, time_str: str):
+def _send_reminder_job(to: str, appointment_id: str, doctor: str, date_str: str, time_str: str, clinic_twilio_number: str | None = None):
     from app.services.whatsapp import send_whatsapp_message_sync
     from app.services.store import mark_reminder_sent
 
@@ -145,7 +145,7 @@ def _send_reminder_job(to: str, appointment_id: str, doctor: str, date_str: str,
         f"Please arrive 5–10 minutes early. Reply if you need to reschedule."
     )
 
-    success = send_whatsapp_message_sync(to, body)
+    success = send_whatsapp_message_sync(to, body, from_number=clinic_twilio_number)
     if success:
         mark_reminder_sent(appointment_id)
         print(f"[Reminder] Sent for appointment {appointment_id}")
@@ -168,6 +168,7 @@ def schedule_reminder(
     doctor: str,
     date_str: str,
     time_str: str,
+    clinic_twilio_number: str | None = None,
 ) -> datetime:
     tz = ZoneInfo(_TZ_NAME)
     now = datetime.now(tz)
@@ -193,7 +194,7 @@ def schedule_reminder(
     scheduler.add_job(
         func=_send_reminder_job,
         trigger=DateTrigger(run_date=fire_at),
-        args=[to, appointment_id, doctor, date_str, time_str],
+        args=[to, appointment_id, doctor, date_str, time_str, clinic_twilio_number],
         id=f"reminder_{appointment_id}",
         replace_existing=True,
         misfire_grace_time=300,
@@ -221,7 +222,7 @@ _NO_SHOW_MSG_2 = (
 )
 
 
-def _no_show_job(to: str, appointment_id: str, attempt: int):
+def _no_show_job(to: str, appointment_id: str, attempt: int, clinic_twilio_number: str | None = None):
     """Fires at +1hr (attempt=1) and +24hr (attempt=2) after missed appointment."""
     from app.services.whatsapp import send_whatsapp_message_sync
     from app.services.store import get_last_active, get_appointment
@@ -251,7 +252,7 @@ def _no_show_job(to: str, appointment_id: str, attempt: int):
         f"{msg}"
     )
 
-    send_whatsapp_message_sync(to, full_msg)
+    send_whatsapp_message_sync(to, full_msg, from_number=clinic_twilio_number)
     print(f"[NoShow] Sent attempt {attempt} for appointment {appointment_id} to {to}")
 
 
@@ -260,6 +261,7 @@ def schedule_no_show_check(
     appointment_id: str,
     date_str: str,
     time_str: str,
+    clinic_twilio_number: str | None = None,
 ) -> None:
     """Schedule no-show recovery at appointment_time+1hr and +24hr."""
     appointment_dt = _resolve_appointment_datetime(date_str, time_str)
@@ -273,7 +275,7 @@ def schedule_no_show_check(
     scheduler.add_job(
         func=_no_show_job,
         trigger=DateTrigger(run_date=check_1hr),
-        args=[to, appointment_id, 1],
+        args=[to, appointment_id, 1, clinic_twilio_number],
         id=f"noshow_1hr_{appointment_id}",
         replace_existing=True,
         misfire_grace_time=600,
@@ -282,7 +284,7 @@ def schedule_no_show_check(
     scheduler.add_job(
         func=_no_show_job,
         trigger=DateTrigger(run_date=check_24hr),
-        args=[to, appointment_id, 2],
+        args=[to, appointment_id, 2, clinic_twilio_number],
         id=f"noshow_24hr_{appointment_id}",
         replace_existing=True,
         misfire_grace_time=3600,
@@ -432,6 +434,7 @@ def _followup_message_job(
     patient_name: str,
     doctor_name: str,
     follow_up_questions: list,
+    clinic_twilio_number: str | None = None,
 ) -> None:
     """Fires on the follow-up day — sends check-in questions to the patient."""
     from app.services.whatsapp import send_whatsapp_message_sync
@@ -459,7 +462,7 @@ def _followup_message_job(
             "To book a follow-up appointment, just reply *book appointment*."
         )
 
-    send_whatsapp_message_sync(patient_number, body)
+    send_whatsapp_message_sync(patient_number, body, from_number=clinic_twilio_number)
     print(f"[FollowUp] Check-in sent to {patient_number}")
 
     try:
@@ -477,6 +480,7 @@ def schedule_followup_message(
     doctor_name: str,
     follow_up_questions: list,
     follow_up_days: int | None,
+    clinic_twilio_number: str | None = None,
 ) -> None:
     """Schedule the follow-up check-in message.
 
@@ -500,7 +504,7 @@ def schedule_followup_message(
     scheduler.add_job(
         func=_followup_message_job,
         trigger=DateTrigger(run_date=fire_at),
-        args=[patient_number, patient_name, doctor_name, follow_up_questions],
+        args=[patient_number, patient_name, doctor_name, follow_up_questions, clinic_twilio_number],
         id=f"followup_{patient_number}",
         replace_existing=True,
         misfire_grace_time=3600,

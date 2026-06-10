@@ -284,7 +284,7 @@ def followup_node(state: BookingState) -> dict:
                     f"{incoming}\n\n"
                     f"_(Just reply here to send back to this patient)_"
                 )
-                send_whatsapp_message_sync(doctor_number, doc_msg)
+                send_whatsapp_message_sync(doctor_number, doc_msg, from_number=state.get("clinic_twilio_number"))
                 save_doctor_reply_context(doctor_number, from_number, patient_name or "")
         except Exception as exc:
             print(f"[followup_agent] Could not notify doctor: {exc}")

@@ -92,6 +92,7 @@ def after_hours_dispatch_node(state: BookingState) -> dict:
         "from_number": state["from_number"],
         "incoming_message": state["incoming_message"],
         "clinic_id": state.get("clinic_id"),
+        "clinic_twilio_number": state.get("clinic_twilio_number"),
         "clinic_open_hour": state.get("clinic_open_hour") or CLINIC_OPEN_HOUR,
         "clinic_close_hour": state.get("clinic_close_hour") or CLINIC_CLOSE_HOUR,
         "intent": state.get("intent", "general_query"),
@@ -165,10 +166,17 @@ def session_node(state: BookingState) -> dict:
     # bookings intact across messages). But always pull journey_state from Redis
     # because background jobs (scheduler) write there and bypass the checkpoint.
     existing = state.get("session")
+    checkpoint_booking_state = state.get("current_booking_state")
     if not existing:
-        redis_session = get_session(state["from_number"], clinic_id=clinic_id)
-        if redis_session:
-            existing = redis_session.model_dump()
+        # Don't fall back to the Redis custom session when the LangGraph checkpoint
+        # has deliberately reset the session (checkpoint has session=None AND
+        # current_booking_state="GREETING" — the fingerprint of a cancel/reject reset).
+        # For a completely new user the checkpoint has no booking state (None), so the
+        # Redis fallback is still used to restore any mid-booking session from other workers.
+        if checkpoint_booking_state != "GREETING":
+            redis_session = get_session(state["from_number"], clinic_id=clinic_id)
+            if redis_session:
+                existing = redis_session.model_dump()
     else:
         redis_session = get_session(state["from_number"], clinic_id=clinic_id)
         if redis_session and redis_session.journey_state != existing.get("journey_state"):
@@ -187,7 +195,11 @@ def session_node(state: BookingState) -> dict:
             "pipeline_log": [f"router/session_node: loaded state={existing.get('state')}"],
         }
     else:
-        new_session = BookingSession(from_number=state["from_number"], clinic_id=clinic_id)
+        new_session = BookingSession(
+            from_number=state["from_number"],
+            clinic_id=clinic_id,
+            clinic_twilio_number=state.get("clinic_twilio_number"),
+        )
         save_session(new_session)
         return {
             "session": new_session.model_dump(),
@@ -215,7 +227,8 @@ def _invoke_sub_agent(graph, state: BookingState) -> dict:
         "is_off_topic": False,
         "pipeline_log": [],
         # Clinic + LLM context — sub-agents need these to use clinic-specific keys
-        "clinic_id":   state.get("clinic_id"),
+        "clinic_id":            state.get("clinic_id"),
+        "clinic_twilio_number": state.get("clinic_twilio_number"),
         "llm_vendor":  state.get("llm_vendor", "groq"),
         "llm_model":   state.get("llm_model",  os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")),
         "llm_enc_key": state.get("llm_enc_key"),

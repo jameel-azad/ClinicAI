@@ -131,7 +131,7 @@ async def finalize_and_send(patient_number: str) -> str:
             f"{sections_str} section(s). Please review the SOAP note carefully."
         )
 
-    send_whatsapp_message_sync(session.doctor_number, doctor_summary)
+    send_whatsapp_message_sync(session.doctor_number, doctor_summary, from_number=getattr(session, "clinic_twilio_number", None))
     print(f"[ConsultationService] Summary sent to doctor {session.doctor_number}")
 
     booking_session = get_session(patient_number)

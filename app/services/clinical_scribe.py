@@ -49,6 +49,7 @@ async def handle_doctor_voice_note(
     caption: str = "",
     llm_enc_key: str | None = None,
     stt_enc_key: str | None = None,
+    clinic_twilio_number: str | None = None,
 ) -> str:
     if not _is_supported_audio(media_content_type):
         return "I received media from the doctor, but it was not a supported audio voice note."
@@ -98,6 +99,7 @@ async def handle_doctor_voice_note(
             "patient_name": patient_name,
             "doctor_number": doctor_number,
             "doctor_name": doctor_name or "",
+            "clinic_twilio_number": clinic_twilio_number,
             "follow_up_questions": follow_up_questions,
             "follow_up_days": follow_up_days,
             # Stored for REGEN support — allows re-running pipeline without re-transcribing audio
@@ -138,17 +140,19 @@ async def handle_doctor_voice_note(
                 regen_hint += f"\n💡 Patient not identified — to approve, reply: *APPROVE {soap_id} +PATIENT_NUMBER*"
             pdf_caption = (fhir_summary + confidence_notice + "\n\n" + regen_hint).strip()
             if public_url:
-                send_whatsapp_document_sync(doctor_number, public_url, "prescription.pdf", pdf_caption)
+                send_whatsapp_document_sync(doctor_number, public_url, "prescription.pdf", pdf_caption, from_number=clinic_twilio_number)
             else:
                 send_whatsapp_message_sync(
                     doctor_number,
                     pdf_caption + "\n\n⚠️ PDF not publicly accessible — please check PUBLIC_BASE_URL config.",
+                    from_number=clinic_twilio_number,
                 )
             # Step 2: send the template with Approve / Reject buttons
             send_whatsapp_template_sync(
                 doctor_number,
                 soap_content_sid,
                 {"1": soap_id, "2": patient_name or "patient"},
+                from_number=clinic_twilio_number,
             )
         else:
             # ── Text fallback (no template configured) ────────────────────────
@@ -174,11 +178,12 @@ async def handle_doctor_voice_note(
                     f"{confidence_notice}"
                 )
             if public_url:
-                send_whatsapp_document_sync(doctor_number, public_url, "prescription.pdf", approval_msg)
+                send_whatsapp_document_sync(doctor_number, public_url, "prescription.pdf", approval_msg, from_number=clinic_twilio_number)
             else:
                 send_whatsapp_message_sync(
                     doctor_number,
                     approval_msg + "\n\n⚠️ PDF not publicly accessible — please check PUBLIC_BASE_URL config.",
+                    from_number=clinic_twilio_number,
                 )
 
         return "Voice note transcribed. Prescription note sent to you for review — approve it to deliver to the patient."

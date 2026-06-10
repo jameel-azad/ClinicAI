@@ -80,6 +80,7 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
 
     public_url = _scribe_pdf_url(document_id)
     caption = f"Doctor's consultation note for {patient_name} is attached."
+    clinic_twilio_number = soap.get("clinic_twilio_number")
 
     delete_pending_soap(soap_id)
 
@@ -89,12 +90,12 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
     # Always save the record, update session, and schedule follow-up —
     # regardless of whether the PDF is publicly accessible.
     _mark_post_consult(patient_number)
-    _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days)
+    _schedule_followup(patient_number, patient_name, soap.get("doctor_number", ""), follow_up_questions, follow_up_days, clinic_twilio_number)
     _save_consultation_record(soap, patient_number, patient_name, public_url)
 
     if public_url:
         filename = f"consultation_{soap_id}.pdf"
-        sent = send_whatsapp_document_sync(patient_number, public_url, filename, caption)
+        sent = send_whatsapp_document_sync(patient_number, public_url, filename, caption, from_number=clinic_twilio_number)
         if sent:
             return f"✅ Prescription note approved and sent to {patient_number}."
         return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please forward manually."
@@ -205,11 +206,12 @@ def _regen(soap_id: str, feedback: str) -> str | None:
             f"🔄 *REGEN {soap_id} <more feedback>* — regenerate again"
         )
 
+        clinic_twilio_number = soap.get("clinic_twilio_number")
         if public_url:
             filename = f"consultation_{soap_id}.pdf"
-            send_whatsapp_document_sync(doctor_number, public_url, filename, regen_msg)
+            send_whatsapp_document_sync(doctor_number, public_url, filename, regen_msg, from_number=clinic_twilio_number)
         else:
-            send_whatsapp_message_sync(doctor_number, regen_msg)
+            send_whatsapp_message_sync(doctor_number, regen_msg, from_number=clinic_twilio_number)
 
         return f"🔄 Regenerating prescription for {soap_id} — updated note sent to you for review."
 
@@ -277,6 +279,7 @@ def _schedule_followup(
     doctor_number: str,
     follow_up_questions: list,
     follow_up_days: int | None,
+    clinic_twilio_number: str | None = None,
 ) -> None:
     """Schedule the follow-up check-in message for the patient."""
     try:
@@ -292,6 +295,7 @@ def _schedule_followup(
             doctor_name=doctor_name,
             follow_up_questions=follow_up_questions,
             follow_up_days=follow_up_days,
+            clinic_twilio_number=clinic_twilio_number,
         )
     except Exception as exc:
         print(f"[SOAP] Could not schedule follow-up message: {exc}")

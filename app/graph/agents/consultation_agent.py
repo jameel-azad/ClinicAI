@@ -97,6 +97,7 @@ def start_or_resume_node(state: BookingState) -> dict:
         doctor_number=doctor_number,
         doctor_name=doctor_name,
         clinic_id=clinic_id,
+        clinic_twilio_number=state.get("clinic_twilio_number"),
         appointment_id=appt.appointment_id if appt else None,
         messages=[ConsultationMessage(sender_role="patient", text=message, timestamp=now)],
         started_at=now,

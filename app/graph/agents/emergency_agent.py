@@ -20,6 +20,7 @@ def emergency_node(state: BookingState) -> dict:
 
     from_number = state["from_number"]
     clinic_name = os.getenv("CLINIC_NAME", "ClinicAI")
+    clinic_twilio_number = state.get("clinic_twilio_number")
 
     for doctor_number in all_doctor_numbers():
         send_whatsapp_message_sync(
@@ -27,6 +28,7 @@ def emergency_node(state: BookingState) -> dict:
             f"🚨 *{clinic_name} — EMERGENCY ALERT*\n\n"
             f"Patient *{from_number}* has reported a medical emergency on WhatsApp.\n"
             "Please respond immediately or call 112.",
+            from_number=clinic_twilio_number,
         )
 
     return {

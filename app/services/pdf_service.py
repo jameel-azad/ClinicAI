@@ -167,6 +167,7 @@ async def handle_incoming_pdf(
     media_id: str,
     from_number: str = "",
     llm_enc_key: str | None = None,
+    clinic_twilio_number: str | None = None,
 ) -> str:
     """
     Handle a WhatsApp PDF from a patient:
@@ -199,7 +200,7 @@ async def handle_incoming_pdf(
 
         lab_id = "LAB" + str(uuid.uuid4())[:6].upper()
         doctor_numbers = _find_doctor_for_patient(from_number)
-        _forward_report_to_doctor(final_state, from_number, pdf_url, lab_id=lab_id, doctor_numbers=doctor_numbers)
+        _forward_report_to_doctor(final_state, from_number, pdf_url, lab_id=lab_id, doctor_numbers=doctor_numbers, clinic_twilio_number=clinic_twilio_number)
 
         if doctor_numbers:
             from app.services.store import save_pending_lab_review
@@ -274,6 +275,7 @@ def _forward_report_to_doctor(
     pdf_url: str | None = None,
     lab_id: str | None = None,
     doctor_numbers: list[str] | None = None,
+    clinic_twilio_number: str | None = None,
 ) -> None:
     """Send the text summary and (if available) the original PDF to the relevant doctor(s)."""
     from app.services.whatsapp import send_whatsapp_message_sync, send_whatsapp_document_sync
@@ -323,13 +325,14 @@ def _forward_report_to_doctor(
     message = "\n".join(line for line in lines if line is not None)
 
     for number in doctor_numbers:
-        send_whatsapp_message_sync(number, message)
+        send_whatsapp_message_sync(number, message, from_number=clinic_twilio_number)
         if pdf_url:
             send_whatsapp_document_sync(
                 number,
                 pdf_url,
                 "lab_report.pdf",
                 f"Original lab report — {patient_name}",
+                from_number=clinic_twilio_number,
             )
         print(f"[Parser] Report forwarded to doctor {number}")
         # Set reply context so the doctor can type a free-form reply that

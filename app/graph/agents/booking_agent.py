@@ -268,6 +268,49 @@ def _finalize_slot(session: BookingSession) -> None:
         print(f"[WARN] slot resolution failed: {exc}")
 
 
+def _is_past_date(date_str: str | None) -> tuple[bool, str | None]:
+    """Return (is_past, display_str) for a free-text date.
+
+    is_past=True  → the date resolves to before today (in clinic timezone).
+    display_str   → normalised 'D Month YYYY' string, or None if unparseable.
+    """
+    if not date_str:
+        return False, None
+    try:
+        from app.services.google_calendar import resolve_date
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata"))
+        resolved = resolve_date(date_str, tz)
+        if resolved is None:
+            return False, None
+        today = datetime.now(tz).date()
+        display = f"{resolved.day} {resolved.strftime('%B %Y')}"
+        return resolved < today, display
+    except Exception:
+        return False, None
+
+
+def _ask_for_missing(session: "BookingSession", missing: list) -> str:
+    """Return a targeted prompt for exactly the missing booking fields."""
+    if missing == ["requested_time"]:
+        date_hint = f" on *{session.requested_date}*" if session.requested_date else ""
+        return f"Got it! What time would you prefer{date_hint}?\n_(e.g. '5 PM', '3:30 PM')_"
+    if missing == ["requested_date"]:
+        return "What date would you prefer?\n_(e.g. '15th June', 'tomorrow')_"
+    if missing == ["requested_date", "requested_time"]:
+        return "What date and time would you prefer?\n_(e.g. '15 June at 5 PM')_"
+    if missing == ["patient_name"]:
+        return "Could you share the patient's name? 👤"
+    # Multiple missing — list them
+    parts = []
+    if "patient_name" in missing: parts.append("👤 *Patient name*")
+    if "requested_date" in missing: parts.append("📅 *Preferred date* (e.g. 15 June)")
+    if "requested_time" in missing: parts.append("🕐 *Preferred time* (e.g. 5 PM)")
+    if "doctor_name" in missing: parts.append("👨‍⚕️ *Doctor's name*")
+    return "Almost there! Just need:\n\n" + "\n".join(parts)
+
+
 def _get_resume_message(session_dict: dict) -> str:
     state = session_dict.get("state", "GREETING")
     if state == "COLLECT_DATE_TIME":
@@ -353,6 +396,24 @@ def flow_node(state: BookingState) -> dict:
         if resolved:
             session.doctor_name = resolved
             session.doctor_shortlist = None
+
+            # Re-validate the stored date in case it was set before this state
+            if session.requested_date:
+                _past, _display = _is_past_date(session.requested_date)
+                if _past:
+                    session.requested_date = None
+                    session.state = "COLLECTING_INFO"
+                    return {
+                        "session": session.model_dump(),
+                        "current_booking_state": "COLLECTING_INFO",
+                        "reply_message": (
+                            f"Sorry, *{_display}* has already passed. "
+                            "Please share a future date for your appointment.\n"
+                            "_(e.g. 'tomorrow', '15 June', 'next Monday')_"
+                        ),
+                        "pipeline_log": [f"flow_node: past date '{_display}' rejected in COLLECT_DOCTOR_PREFERENCE"],
+                    }
+
             # Check what's still missing after the doctor is chosen
             remaining = []
             if not session.patient_name: remaining.append("patient_name")
@@ -387,12 +448,18 @@ def flow_node(state: BookingState) -> dict:
                 "pipeline_log": [f"flow_node: doctor={resolved}, still need {remaining}"],
             }
 
-        # Could not resolve — re-show the doctor list
+        # Could not resolve — show a clear "not found" message then re-list
+        _attempted = incoming_message.strip()
+        _not_found_msg = (
+            f"Sorry, *{_attempted}* is not registered at this clinic.\n\n"
+            if len(_attempted) <= 40
+            else "Sorry, that doctor is not registered at this clinic.\n\n"
+        )
         return {
             "session": session.model_dump(),
             "current_booking_state": "COLLECT_DOCTOR_PREFERENCE",
-            "reply_message": "I didn't catch that. Please pick a doctor:\n\n" + format_for_whatsapp(doctors),
-            "pipeline_log": ["flow_node: COLLECT_DOCTOR_PREFERENCE — unresolved, re-asked"],
+            "reply_message": _not_found_msg + format_for_whatsapp(doctors),
+            "pipeline_log": ["flow_node: COLLECT_DOCTOR_PREFERENCE — doctor not found, re-showed list"],
         }
     # ── END COLLECT_DOCTOR_PREFERENCE ────────────────────────────────────────
 
@@ -421,6 +488,13 @@ def flow_node(state: BookingState) -> dict:
                 "reply_message": "The doctor could not approve that slot. Please send another date and time.",
                 "pipeline_log": ["flow_node: doctor rejected pending appointment"],
             }
+        if status == "cancelled":
+            return {
+                "session": None,
+                "current_booking_state": "GREETING",
+                "reply_message": "Your previous request was cancelled. Would you like to book a new appointment?",
+                "pipeline_log": ["flow_node: patient-cancelled approval, resetting to GREETING"],
+            }
         return {
             "current_booking_state": "WAITING_DOCTOR_APPROVAL",
             "reply_message": (
@@ -444,18 +518,81 @@ def flow_node(state: BookingState) -> dict:
 
     session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
 
-    # If COLLECTING_INFO but no data collected yet, treat as a fresh GREETING
+    # Bare greeting in any non-committed state → fresh welcome and session reset.
+    # This prevents stale Redis sessions (from previous incomplete bookings) from
+    # causing the classifier's LLM bot_response to leak through instead of MSG_GREETING.
+    if _is_greeting(incoming_message) and booking_state in (
+        "GREETING", "COLLECTING_INFO", "COLLECT_DOCTOR_PREFERENCE"
+    ):
+        fresh = BookingSession(
+            from_number=from_number,
+            clinic_id=session.clinic_id,
+            clinic_twilio_number=session.clinic_twilio_number,
+        )
+        return {
+            "session": fresh.model_dump(),
+            "current_booking_state": "GREETING",
+            "reply_message": MSG_GREETING,
+            "pipeline_log": ["flow_node: bare greeting → welcome menu, session reset"],
+        }
+
+    # Apply entities first so the COLLECTING_INFO check below sees any data from
+    # the current message (not just what was accumulated in previous turns).
+    if entities.get("patient_name"): session.patient_name = entities["patient_name"]
+    if entities.get("requested_date"): session.requested_date = entities["requested_date"]
+    if entities.get("requested_time"): session.requested_time = entities["requested_time"]
+    if entities.get("symptoms_mentioned"): session.symptoms = entities["symptoms_mentioned"]
+
+    # Validate extracted doctor name against the clinic directory before accepting it.
+    if entities.get("doctor_name"):
+        from app.services.doctor_directory import (
+            resolve_selection, all_doctors, format_for_whatsapp,
+        )
+        _raw_doctor = entities["doctor_name"]
+        _all_docs = all_doctors()
+        _resolved = resolve_selection(_raw_doctor, _all_docs)
+        if _resolved:
+            session.doctor_name = _resolved  # normalise to canonical name from DB
+        else:
+            # Doctor name provided but not in this clinic — show list with explanation
+            session.doctor_name = None
+            session.state = "COLLECT_DOCTOR_PREFERENCE"
+            session.doctor_shortlist = [d.get("name") for d in _all_docs if d.get("name")]
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECT_DOCTOR_PREFERENCE",
+                "reply_message": (
+                    f"Sorry, *{_raw_doctor}* is not registered at this clinic.\n\n"
+                    + format_for_whatsapp(_all_docs)
+                ),
+                "pipeline_log": [f"flow_node: doctor '{_raw_doctor}' not found in clinic → showing list"],
+            }
+
+    # Reject past dates — must happen after entity application so we validate
+    # the date from the current message, not an old value sitting in the session.
+    if session.requested_date and entities.get("requested_date"):
+        _past, _display = _is_past_date(session.requested_date)
+        if _past:
+            session.requested_date = None
+            session.state = "COLLECTING_INFO"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": (
+                    f"Sorry, *{_display}* has already passed. "
+                    "Please share a future date for your appointment.\n"
+                    "_(e.g. 'tomorrow', '15 June', 'next Monday')_"
+                ),
+                "pipeline_log": [f"flow_node: past date '{_display}' rejected"],
+            }
+
+    # If COLLECTING_INFO but still no data at all, treat as a fresh GREETING so
+    # the patient gets the proper welcome prompt instead of a generic re-ask.
     if booking_state == "COLLECTING_INFO" and not any([
         session.patient_name, session.requested_date, session.requested_time, session.doctor_name
     ]):
         booking_state = "GREETING"
         session.state = "GREETING"
-
-    if entities.get("patient_name"): session.patient_name = entities["patient_name"]
-    if entities.get("requested_date"): session.requested_date = entities["requested_date"]
-    if entities.get("requested_time"): session.requested_time = entities["requested_time"]
-    if entities.get("doctor_name"): session.doctor_name = entities["doctor_name"]
-    if entities.get("symptoms_mentioned"): session.symptoms = entities["symptoms_mentioned"]
 
     missing = []
     if not session.patient_name: missing.append("patient_name")
@@ -504,7 +641,10 @@ def flow_node(state: BookingState) -> dict:
         elif booking_state == "GREETING" and is_booking:
             reply = MSG_START_BOOKING
         else:
-            reply = bot_response or MSG_START_BOOKING
+            # Mid-conversation with specific missing fields — use a targeted prompt
+            # instead of the LLM bot_response (which is designed for classification,
+            # not for tracking what's still left to collect).
+            reply = _ask_for_missing(session, missing)
         return {
             "session": session.model_dump(),
             "current_booking_state": session.state,
@@ -722,6 +862,7 @@ def cancel_node(state: BookingState) -> dict:
     session_dict = state.get("session") or {}
     booking_state = session_dict.get("state", "GREETING")
 
+    clinic_twilio_number = state.get("clinic_twilio_number")
     if booking_state == "CANCEL_CONFIRM":
         if _is_affirmative(message):
             appt = get_latest_appointment_for_patient(from_number)
@@ -735,6 +876,7 @@ def cancel_node(state: BookingState) -> dict:
                         doctor_number,
                         f"Patient {appt.patient_name or from_number} has cancelled their "
                         f"appointment on {appt.date_str} at {appt.time_str}.",
+                        from_number=clinic_twilio_number,
                     )
                 return {
                     "session": None,
@@ -790,13 +932,14 @@ def cancel_node(state: BookingState) -> dict:
             }
         approval = get_latest_approval_for_patient(from_number)
         if approval and approval.get("status") == "waiting_doctor":
-            update_pending_approval(approval["approval_id"], status="rejected")
+            update_pending_approval(approval["approval_id"], status="cancelled")
             doctor_number = find_doctor_number(approval.get("doctor_name"))
             if doctor_number:
                 send_whatsapp_message_sync(
                     doctor_number,
                     f"Patient {approval.get('patient_name') or from_number} has cancelled "
                     f"their appointment request {approval['approval_id']}.",
+                    from_number=clinic_twilio_number,
                 )
         return {
             "session": None,

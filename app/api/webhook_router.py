@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import os
 import threading as _threading
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from sqlalchemy import select
@@ -58,13 +61,16 @@ def _get_patient_lock(patient_number: str) -> asyncio.Lock:
 async def _verify_twilio_signature(request: Request) -> None:
     """FastAPI dependency: validates X-Twilio-Signature on every inbound webhook.
 
-    Skipped in dev/mock mode (TWILIO_AUTH_TOKEN not set).
+    Skipped when TWILIO_AUTH_TOKEN is not set OR TWILIO_SKIP_VALIDATION=true.
     Set WEBHOOK_PUBLIC_URL to the exact URL Twilio posts to (handles reverse
     proxies where the URL visible to FastAPI differs from Twilio's target).
     """
+    if os.getenv("TWILIO_SKIP_VALIDATION", "").lower() == "true":
+        return  # explicit dev/testing override
+
     auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
     if not auth_token:
-        return  # dev/mock mode — no credentials, skip validation
+        return  # no credentials configured — skip validation
 
     signature = request.headers.get("X-Twilio-Signature", "")
     if not signature:
@@ -94,7 +100,7 @@ async def _verify_twilio_signature(request: Request) -> None:
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"[Webhook] Signature validation error: {exc}")
+        logger.error("[Webhook] Signature validation error: %s", exc)
         raise HTTPException(status_code=403, detail="Signature validation failed")
 
 
@@ -193,10 +199,7 @@ async def twilio_webhook(
     model_cfg = await _resolve_model_config(clinic_id, db)
     llm_fields = _build_llm_state_fields(model_cfg)
 
-    print(
-        f"\n[Webhook] From: {from_number} | Role: {identity.role} | "
-        f"To: {To}"
-    )
+    logger.info("[Webhook] From: %s | Role: %s | To: %s", from_number, identity.role, To)
 
     # Upsert patient row immediately so the dashboard shows every patient
     # who has ever messaged the clinic — not just post-consultation ones.
@@ -241,7 +244,7 @@ async def twilio_webhook(
         and MediaContentType0
         and MediaContentType0.lower() == "application/pdf"
     ):
-        print(f"[Webhook] Received PDF: {MediaUrl0}")
+        logger.info("[Webhook] Received PDF: %s", MediaUrl0)
         from app.services.pdf_service import handle_incoming_pdf
 
         reply = await handle_incoming_pdf(
@@ -274,8 +277,8 @@ async def twilio_webhook(
                 )
             reply = final_state.get("reply_message", "")
             pipeline = final_state.get("pipeline_log", [])
-            print(f"[Graph] Pipeline: {' -> '.join(n.split(':')[0] for n in pipeline)}")
-            print(f"[Graph] Reply: {reply[:80]}...")
+            logger.info("[Graph] Pipeline: %s", " -> ".join(n.split(":")[0] for n in pipeline))
+            logger.info("[Graph] Reply: %s...", reply[:80])
 
             # Persist session to Redis with last_bot_response for context-aware classification
             if reply and final_state.get("session"):
@@ -286,7 +289,7 @@ async def twilio_webhook(
                     sess_dict["last_bot_response"] = reply[:300]
                     save_session(BookingSession(**sess_dict))
                 except Exception as sess_err:
-                    print(f"[WARN] Could not persist session: {sess_err}")
+                    logger.warning("[Webhook] Could not persist session: %s", sess_err)
 
             # Update patient name in DB once the booking flow captures it
             captured_name = (final_state.get("session") or {}).get("patient_name")
@@ -298,7 +301,7 @@ async def twilio_webhook(
                     pass
 
         except Exception as e:
-            print(f"[ERROR] Booking graph failed: {e}")
+            logger.error("[Graph] Booking graph failed: %s", e)
             reply = (
                 "Sorry, we're experiencing a technical issue. "
                 "Please try again or call the clinic directly."
@@ -323,9 +326,9 @@ async def _invoke_router_graph(
         )
         reply: str = final_state.get("reply_message", "")
         pipeline = final_state.get("pipeline_log", [])
-        print(f"[Graph] Pipeline: {' -> '.join(n.split(':')[0] for n in pipeline)}")
+        logger.info("[Graph] Pipeline: %s", " -> ".join(n.split(":")[0] for n in pipeline))
         if reply:
-            print(f"[Graph] Reply: {reply[:80]}...")
+            logger.info("[Graph] Reply: %s...", reply[:80])
 
         # Persist session to Redis with last_bot_response for context-aware classification
         if reply and final_state.get("session"):
@@ -336,12 +339,12 @@ async def _invoke_router_graph(
                 sess_dict["last_bot_response"] = reply[:300]
                 save_session(BookingSession(**sess_dict))
             except Exception as sess_err:
-                print(f"[WARN] Could not persist session: {sess_err}")
+                logger.warning("[Webhook] Could not persist session: %s", sess_err)
 
         return reply
 
     except Exception as exc:
-        print(f"[ERROR] Booking graph failed for {from_number}: {exc}")
+        logger.error("[Graph] Booking graph failed for %s: %s", from_number, exc)
         return (
             "Sorry, we're experiencing a technical issue. "
             "Please try again or call the clinic directly."

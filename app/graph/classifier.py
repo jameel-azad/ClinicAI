@@ -1,9 +1,12 @@
 import json
+import logging
 import os
 import re
 from typing import Literal
 
 from dotenv import load_dotenv
+
+_log = logging.getLogger(__name__)
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
@@ -222,7 +225,7 @@ def classify_node(state: ClassifierState) -> dict:
         }
 
     except Exception as e:
-        print(f"[WARN] classify_node {vendor} error: {e}")
+        _log.warning("[Classifier] classify_node %s error: %s", vendor, e)
         return {
             "llm_error": str(e),
             "pipeline_log": [f"classify_node: FAILED — {str(e)[:80]}"],
@@ -277,7 +280,7 @@ def fallback_node(state: ClassifierState) -> dict:
         }
 
     except Exception as e:
-        print(f"[ERROR] fallback_node Gemini also failed: {e}")
+        _log.error("[Classifier] fallback_node Gemini also failed: %s", e)
         result = {
             "intent": "general_query",
             "confidence": 0.0,

@@ -1,8 +1,11 @@
+import logging
 import os
 import re
 import shutil
 
 from app.services.clinical_scribe import get_scribe_pdf_path, _format_fhir_whatsapp_summary
+
+logger = logging.getLogger(__name__)
 from app.services.store import delete_pending_soap, get_latest_soap_for_doctor, get_pending_soap, save_pending_soap
 from app.services.whatsapp import send_whatsapp_document_sync, send_whatsapp_message_sync
 
@@ -236,9 +239,9 @@ def _mark_post_consult(patient_number: str) -> None:
         session = get_session(patient_number) or BookingSession(from_number=patient_number)
         session.journey_state = "POST_CONSULT"
         save_session(session)
-        print(f"[SOAP] journey_state → POST_CONSULT for {patient_number}")
+        logger.info("[SOAP] journey_state → POST_CONSULT for %s", patient_number)
     except Exception as exc:
-        print(f"[SOAP] Could not update patient session to POST_CONSULT: {exc}")
+        logger.warning("[SOAP] Could not update patient session to POST_CONSULT: %s", exc)
 
 
 def _save_consultation_record(soap: dict, patient_number: str, patient_name: str, pdf_url: str | None) -> None:
@@ -270,7 +273,7 @@ def _save_consultation_record(soap: dict, patient_number: str, patient_name: str
             doctor_name_hint=soap.get("doctor_name"),
         ))
     except Exception as exc:
-        print(f"[SOAP] Could not save consultation record: {exc}")
+        logger.warning("[SOAP] Could not save consultation record: %s", exc)
 
 
 def _schedule_followup(
@@ -298,4 +301,4 @@ def _schedule_followup(
             clinic_twilio_number=clinic_twilio_number,
         )
     except Exception as exc:
-        print(f"[SOAP] Could not schedule follow-up message: {exc}")
+        logger.warning("[SOAP] Could not schedule follow-up message: %s", exc)

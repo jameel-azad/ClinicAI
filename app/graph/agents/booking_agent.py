@@ -1,7 +1,10 @@
 import json
+import logging
 import os
 import re
 from typing import Literal
+
+_log = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -180,7 +183,7 @@ def _extract_booking_entities(
         cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
         return json.loads(cleaned)
     except Exception as e:
-        print(f"[WARN] Entity extraction failed: {e}")
+        _log.warning("[BookingAgent] Entity extraction failed: %s", e)
         return {"patient_name": None, "requested_date": None,
                 "requested_time": None, "doctor_name": None}
 
@@ -265,7 +268,7 @@ def _finalize_slot(session: BookingSession) -> None:
             session.doctor_name, session.requested_date, session.requested_time
         )
     except Exception as exc:
-        print(f"[WARN] slot resolution failed: {exc}")
+        _log.warning("[BookingAgent] Slot resolution failed: %s", exc)
 
 
 def _is_past_date(date_str: str | None) -> tuple[bool, str | None]:

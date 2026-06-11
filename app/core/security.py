@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
@@ -29,8 +28,6 @@ if _key_insecure:
     )
     if os.getenv("ENVIRONMENT", "").lower() in ("production", "prod"):
         raise RuntimeError(f"FATAL SECURITY ERROR: {_msg}")
-    _banner = "\n" + "!" * 72 + f"\n  SECURITY WARNING: {_msg}\n" + "!" * 72
-    print(_banner, file=sys.stderr, flush=True)
     _log.critical("SECURITY WARNING: %s", _msg)
 # ──────────────────────────────────────────────────────────────────────────────
 

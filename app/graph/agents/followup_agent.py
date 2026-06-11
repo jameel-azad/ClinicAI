@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 import re as _re
 
 from dotenv import load_dotenv
+
+_log = logging.getLogger(__name__)
 from langgraph.graph import StateGraph, START, END
 
 from app.schemas import BookingState
@@ -133,7 +136,7 @@ def _fetch_consultation_sync(clinic_id: str | None, patient_phone: str) -> dict 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, _do_fetch()).result(timeout=15)
     except Exception as exc:
-        print(f"[followup_agent] _fetch_consultation_sync failed: {exc}")
+        _log.warning("[followup_agent] _fetch_consultation_sync failed: %s", exc)
         return None
 
 
@@ -206,7 +209,7 @@ def _analyze_followup_query(
             "escalate_reason": str(result.get("escalate_reason", "")),
         }
     except Exception as exc:
-        print(f"[followup_agent] LLM analysis failed, defaulting to escalate: {exc}")
+        _log.error("[followup_agent] LLM analysis failed, defaulting to escalate: %s", exc)
         return {"can_answer": False, "answer": "", "confidence": 0.0, "escalate_reason": "LLM error"}
 
 
@@ -287,7 +290,7 @@ def followup_node(state: BookingState) -> dict:
                 send_whatsapp_message_sync(doctor_number, doc_msg, from_number=state.get("clinic_twilio_number"))
                 save_doctor_reply_context(doctor_number, from_number, patient_name or "")
         except Exception as exc:
-            print(f"[followup_agent] Could not notify doctor: {exc}")
+            _log.warning("[followup_agent] Could not notify doctor: %s", exc)
 
         # Ack to patient — prompt to share report if they mentioned it
         if _mentions_report(incoming):

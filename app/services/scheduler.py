@@ -148,16 +148,16 @@ def _send_reminder_job(to: str, appointment_id: str, doctor: str, date_str: str,
     success = send_whatsapp_message_sync(to, body, from_number=clinic_twilio_number)
     if success:
         mark_reminder_sent(appointment_id)
-        print(f"[Reminder] Sent for appointment {appointment_id}")
+        _log.info("[Reminder] Sent for appointment %s", appointment_id)
     else:
-        print(f"[Reminder] FAILED for appointment {appointment_id}")
+        _log.error("[Reminder] FAILED for appointment %s", appointment_id)
 
 
 def cancel_reminder(appointment_id: str) -> None:
     job_id = f"reminder_{appointment_id}"
     try:
         scheduler.remove_job(job_id)
-        print(f"[Reminder] Cancelled job {job_id}")
+        _log.info("[Reminder] Cancelled job %s", job_id)
     except Exception:
         pass
 
@@ -177,12 +177,12 @@ def schedule_reminder(
     if _DEMO_REMINDER_DELAY:
         delay_mins = int(_DEMO_REMINDER_DELAY)
         fire_at = now + timedelta(minutes=delay_mins)
-        print(f"[Reminder] DEMO MODE — firing in {delay_mins} min for {appointment_id}")
+        _log.info("[Reminder] DEMO MODE — firing in %d min for %s", delay_mins, appointment_id)
     else:
         appointment_dt = _resolve_appointment_datetime(date_str, time_str)
 
         if appointment_dt is None:
-            print(f"[Reminder] Could not parse '{date_str} {time_str}' for {appointment_id} — skipping")
+            _log.warning("[Reminder] Could not parse '%s %s' for %s — skipping", date_str, time_str, appointment_id)
             return now
 
         fire_at = appointment_dt - timedelta(minutes=REMINDER_MINUTES)
@@ -200,9 +200,9 @@ def schedule_reminder(
         misfire_grace_time=300,
     )
 
-    print(
-        f"[Reminder] Scheduled at {fire_at.strftime('%Y-%m-%d %H:%M')} "
-        f"({REMINDER_MINUTES} min before appointment) — {appointment_id}"
+    _log.info(
+        "[Reminder] Scheduled at %s (%d min before appointment) — %s",
+        fire_at.strftime("%Y-%m-%d %H:%M"), REMINDER_MINUTES, appointment_id,
     )
     return fire_at
 
@@ -230,7 +230,7 @@ def _no_show_job(to: str, appointment_id: str, attempt: int, clinic_twilio_numbe
 
     appt = get_appointment(appointment_id)
     if not appt:
-        print(f"[NoShow] Appointment {appointment_id} not found — skipping")
+        _log.warning("[NoShow] Appointment %s not found — skipping", appointment_id)
         return
 
     tz = ZoneInfo(_TZ_NAME)
@@ -240,7 +240,7 @@ def _no_show_job(to: str, appointment_id: str, attempt: int, clinic_twilio_numbe
 
     last_active = get_last_active(to)
     if last_active and last_active > appt_dt:
-        print(f"[NoShow] Patient {to} was active after appointment — not a no-show")
+        _log.info("[NoShow] Patient %s was active after appointment — not a no-show", to)
         return
 
     msg = _NO_SHOW_MSG_1 if attempt == 1 else _NO_SHOW_MSG_2
@@ -253,7 +253,7 @@ def _no_show_job(to: str, appointment_id: str, attempt: int, clinic_twilio_numbe
     )
 
     send_whatsapp_message_sync(to, full_msg, from_number=clinic_twilio_number)
-    print(f"[NoShow] Sent attempt {attempt} for appointment {appointment_id} to {to}")
+    _log.info("[NoShow] Sent attempt %d for appointment %s to %s", attempt, appointment_id, to)
 
 
 def schedule_no_show_check(
@@ -266,7 +266,7 @@ def schedule_no_show_check(
     """Schedule no-show recovery at appointment_time+1hr and +24hr."""
     appointment_dt = _resolve_appointment_datetime(date_str, time_str)
     if appointment_dt is None:
-        print(f"[NoShow] Could not parse '{date_str} {time_str}' — skipping no-show setup")
+        _log.warning("[NoShow] Could not parse '%s %s' — skipping no-show setup", date_str, time_str)
         return
 
     check_1hr = appointment_dt + timedelta(hours=1)
@@ -290,9 +290,9 @@ def schedule_no_show_check(
         misfire_grace_time=3600,
     )
 
-    print(
-        f"[NoShow] Scheduled checks at +1hr ({check_1hr.strftime('%Y-%m-%d %H:%M')}) "
-        f"and +24hr ({check_24hr.strftime('%Y-%m-%d %H:%M')}) for {appointment_id}"
+    _log.info(
+        "[NoShow] Scheduled checks at +1hr (%s) and +24hr (%s) for %s",
+        check_1hr.strftime("%Y-%m-%d %H:%M"), check_24hr.strftime("%Y-%m-%d %H:%M"), appointment_id,
     )
 
 
@@ -326,12 +326,12 @@ def _consultation_timeout_job(
     session.is_active = False
     save_consultation(patient_number, session)
 
-    print(f"[Consultation] Timeout fired for {patient_number} — finalising")
+    _log.info("[Consultation] Timeout fired for %s — finalising", patient_number)
     try:
         from app.services.consultation_service import finalize_and_send
         run_async(finalize_and_send(patient_number), timeout=90)
     except Exception as exc:
-        print(f"[Consultation] Timeout finalisation failed for {patient_number}: {exc}")
+        _log.error("[Consultation] Timeout finalisation failed for %s: %s", patient_number, exc)
 
 
 def schedule_consultation_timeout(
@@ -350,7 +350,7 @@ def schedule_consultation_timeout(
         replace_existing=True,
         misfire_grace_time=300,
     )
-    print(f"[Consultation] Timeout set for {patient_number} at {fire_at.strftime('%H:%M')} ({CONSULTATION_TIMEOUT_MINUTES} min)")
+    _log.info("[Consultation] Timeout set for %s at %s (%d min)", patient_number, fire_at.strftime("%H:%M"), CONSULTATION_TIMEOUT_MINUTES)
 
 
 def reset_consultation_timeout(
@@ -363,7 +363,7 @@ def reset_consultation_timeout(
 def cancel_consultation_timeout(patient_number: str) -> None:
     try:
         scheduler.remove_job(f"consult_timeout_{patient_number}")
-        print(f"[Consultation] Timeout cancelled for {patient_number}")
+        _log.info("[Consultation] Timeout cancelled for %s", patient_number)
     except Exception:
         pass
 
@@ -382,7 +382,7 @@ def _flush_afterhours_job(doctor_number: str) -> None:
     if not queued:
         return
 
-    print(f"[AfterHours] Flushing {len(queued)} queued messages for doctor {doctor_number}")
+    _log.info("[AfterHours] Flushing %d queued messages for doctor %s", len(queued), doctor_number)
     clear_after_hours_queue(doctor_number)
 
     _default_close = int(os.getenv("CLINIC_CLOSE_HOUR", "20"))
@@ -404,9 +404,9 @@ def _flush_afterhours_job(doctor_number: str) -> None:
             try:
                 router_graph.invoke(state_update, config=config)
             except Exception as msg_exc:
-                print(f"[AfterHours] Failed to re-inject message from {from_number}: {msg_exc}")
+                _log.error("[AfterHours] Failed to re-inject message from %s: %s", from_number, msg_exc)
     except Exception as exc:
-        print(f"[AfterHours] Flush job failed: {exc}")
+        _log.error("[AfterHours] Flush job failed: %s", exc)
 
 
 def schedule_afterhours_flush(doctor_number: str) -> None:
@@ -418,7 +418,7 @@ def schedule_afterhours_flush(doctor_number: str) -> None:
         id=f"afterhours_flush_{doctor_number}",
         replace_existing=True,
     )
-    print(f"[AfterHours] Flush scheduled daily at {_CLINIC_OPEN_HOUR:02d}:00 IST for {doctor_number}")
+    _log.info("[AfterHours] Flush scheduled daily at %02d:00 IST for %s", _CLINIC_OPEN_HOUR, doctor_number)
 
 
 # ── Follow-up check-in jobs ────────────────────────────────────────────────────
@@ -463,7 +463,7 @@ def _followup_message_job(
         )
 
     send_whatsapp_message_sync(patient_number, body, from_number=clinic_twilio_number)
-    print(f"[FollowUp] Check-in sent to {patient_number}")
+    _log.info("[FollowUp] Check-in sent to %s", patient_number)
 
     try:
         session = get_session(patient_number) or BookingSession(from_number=patient_number)
@@ -471,7 +471,7 @@ def _followup_message_job(
         session.state = "BOOKED"  # prevent booking flow from re-triggering
         save_session(session)
     except Exception as exc:
-        print(f"[FollowUp] Could not update journey_state: {exc}")
+        _log.warning("[FollowUp] Could not update journey_state: %s", exc)
 
 
 def schedule_followup_message(
@@ -494,12 +494,12 @@ def schedule_followup_message(
     if _DEMO_FOLLOWUP_DELAY:
         delay_mins = int(_DEMO_FOLLOWUP_DELAY)
         fire_at = now + timedelta(minutes=delay_mins)
-        print(f"[FollowUp] DEMO MODE — firing in {delay_mins} min for {patient_number}")
+        _log.info("[FollowUp] DEMO MODE — firing in %d min for %s", delay_mins, patient_number)
     else:
         days = follow_up_days if follow_up_days and follow_up_days > 0 else FOLLOWUP_DEFAULT_DAYS
         fire_at = now + timedelta(days=days)
         source = "doctor-specified" if follow_up_days else f"default ({FOLLOWUP_DEFAULT_DAYS}d)"
-        print(f"[FollowUp] Scheduled in {days} day(s) ({source}) at {fire_at.strftime('%Y-%m-%d %H:%M')} for {patient_number}")
+        _log.info("[FollowUp] Scheduled in %d day(s) (%s) at %s for %s", days, source, fire_at.strftime("%Y-%m-%d %H:%M"), patient_number)
 
     scheduler.add_job(
         func=_followup_message_job,
@@ -561,7 +561,7 @@ def _weekly_insights_job(doctor_number: str) -> None:
             "Have a great week! 🙏"
         )
         send_whatsapp_message_sync(doctor_number, msg)
-        print(f"[WeeklyInsights] Sent (0 appointments) to {doctor_number}")
+        _log.info("[WeeklyInsights] Sent (0 appointments) to %s", doctor_number)
         return
 
     # Aggregate metrics
@@ -644,7 +644,7 @@ def _weekly_insights_job(doctor_number: str) -> None:
 
     msg = "\n".join(lines)
     send_whatsapp_message_sync(doctor_number, msg)
-    print(f"[WeeklyInsights] Sent to {doctor_number} — {total} appointments, {no_show_count} no-shows")
+    _log.info("[WeeklyInsights] Sent to %s — %d appointments, %d no-shows", doctor_number, total, no_show_count)
 
 
 def schedule_weekly_insights(doctor_number: str) -> None:
@@ -661,7 +661,4 @@ def schedule_weekly_insights(doctor_number: str) -> None:
         id=f"weekly_insights_{doctor_number}",
         replace_existing=True,
     )
-    print(
-        f"[WeeklyInsights] Scheduled every Monday at "
-        f"{_WEEKLY_INSIGHTS_HOUR:02d}:00 IST for {doctor_number}"
-    )
+    _log.info("[WeeklyInsights] Scheduled every Monday at %02d:00 IST for %s", _WEEKLY_INSIGHTS_HOUR, doctor_number)

@@ -239,7 +239,7 @@ def soap_generator_node(state: ScribeState) -> dict:
 
     if not transcript:
         msg = "No transcript available for SOAP generation."
-        print(f"[soap_gen] {msg}")
+        logger.warning("[soap_gen] %s", msg)
         errors.append(msg)
         return {
             "soap_note": _empty_soap(),
@@ -251,7 +251,7 @@ def soap_generator_node(state: ScribeState) -> dict:
     for attempt in range(2):
         try:
             if attempt > 0:
-                print(f"[soap_gen] Retry attempt {attempt + 1} after delay...")
+                logger.info("[soap_gen] Retry attempt %d after delay...", attempt + 1)
                 time.sleep(3)
 
             llm = _llm(state.get("llm_enc_key"))
@@ -260,7 +260,7 @@ def soap_generator_node(state: ScribeState) -> dict:
                 HumanMessage(content=f"Doctor's voice note transcript:\n\n{transcript}"),
             ]
             response = llm.invoke(messages)
-            print(f"[soap_gen] LLM response received, length={len(str(response.content))}")
+            logger.info("[soap_gen] LLM response received, length=%d", len(str(response.content)))
 
             soap_raw = _parse_json(response.content)
 
@@ -271,8 +271,7 @@ def soap_generator_node(state: ScribeState) -> dict:
                     missing.append(section)
 
             follow_up_days = soap_raw.get("follow_up_days")
-            print(f"[soap_gen] Success — missing={missing}, follow_up_days={follow_up_days}")
-            logger.info(f"[soap_gen] Success — missing sections: {missing}")
+            logger.info("[soap_gen] Success — missing=%s, follow_up_days=%s", missing, follow_up_days)
             return {
                 "soap_note": soap_raw,
                 "missing_sections": missing,
@@ -282,11 +281,10 @@ def soap_generator_node(state: ScribeState) -> dict:
 
         except Exception as e:
             last_error = e
-            print(f"[soap_gen] Attempt {attempt + 1} FAILED — {type(e).__name__}: {e}")
-            logger.error(f"[soap_gen] Attempt {attempt + 1} failed: {e}")
+            logger.error("[soap_gen] Attempt %d FAILED — %s: %s", attempt + 1, type(e).__name__, e)
 
     msg = f"SOAP generation failed after retries: {last_error}"
-    print(f"[soap_gen] FINAL FAILURE: {msg}")
+    logger.error("[soap_gen] FINAL FAILURE: %s", msg)
     errors.append(msg)
     return {
         "soap_note": _empty_soap(),
@@ -416,8 +414,7 @@ def grounding_check_node(state: ScribeState) -> dict:
 
     except Exception as e:
         msg = f"Grounding check failed: {type(e).__name__}: {e}"
-        print(f"[grounding] {msg}")
-        logger.error(f"[grounding] {msg}")
+        logger.error("[grounding] %s", msg)
         errors.append(msg)
         return {"grounding_report": [], "ungrounded_flags": [], "errors": errors}
 

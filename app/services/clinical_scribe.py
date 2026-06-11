@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,8 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 from app.graph.scribe.nodes import overall_soap_confidence, low_confidence_section_names
 from app.graph.scribe.pipeline import scribe_pipeline
@@ -62,9 +65,9 @@ async def handle_doctor_voice_note(
 
     audio_path = None
     try:
-        print(f"[Scribe] Downloading audio via Twilio...")
+        logger.info("[Scribe] Downloading audio via Twilio...")
         audio_path = await _download_audio(media_url, media_content_type)
-        print(f"[Scribe] Audio saved to {audio_path}, running scribe pipeline...")
+        logger.info("[Scribe] Audio saved to %s, running scribe pipeline...", audio_path)
         result = await asyncio.to_thread(
             _run_scribe_pipeline,
             audio_path=audio_path,
@@ -73,11 +76,11 @@ async def handle_doctor_voice_note(
             llm_enc_key=llm_enc_key,
             stt_enc_key=stt_enc_key,
         )
-        print(f"[Scribe] Pipeline done. errors={result.get('errors', [])}")
+        logger.info("[Scribe] Pipeline done. errors=%s", result.get("errors", []))
 
         pipeline_errors = result.get("errors", [])
         for err in pipeline_errors:
-            print(f"[scribe_pipeline_error] {err}")
+            logger.warning("[Scribe] pipeline error: %s", err)
 
         pdf_path = result.get("pdf_path", "")
         if not pdf_path or not os.path.exists(pdf_path):
@@ -188,7 +191,7 @@ async def handle_doctor_voice_note(
 
         return "Voice note transcribed. Prescription note sent to you for review — approve it to deliver to the patient."
     except Exception as exc:
-        print(f"[Scribe] UNHANDLED ERROR:\n{traceback.format_exc()}")
+        logger.error("[Scribe] UNHANDLED ERROR:\n%s", traceback.format_exc())
         return f"Sorry, I could not process the doctor's voice note: {exc}"
     finally:
         if audio_path and os.path.exists(audio_path):
@@ -397,13 +400,13 @@ def _try_buffer_doctor_audio(media_url: str, doctor_number: str) -> str | None:
             session.audio_files.append({"url": media_url, "duration_secs": None})
             save_consultation(patient_number, session)
 
-            print(f"[Scribe] Buffered doctor audio in consultation {session.consultation_id}")
+            logger.info("[Scribe] Buffered doctor audio in consultation %s", session.consultation_id)
             return (
                 "🎙️ Voice note received and added to the active consultation buffer.\n"
                 "Send *ok done* or *take care* when the consultation is complete."
             )
     except Exception as exc:
-        print(f"[Scribe] _try_buffer_doctor_audio: {exc}")
+        logger.warning("[Scribe] _try_buffer_doctor_audio: %s", exc)
     return None
 
 

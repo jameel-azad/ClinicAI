@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from datetime import datetime, timedelta, date as date_type
@@ -5,6 +6,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -229,7 +232,7 @@ def suggest_google_slots(
 def create_google_calendar_event(approval: dict, calendar_id: str | None = None) -> str | None:
     ready, reason = calendar_setup_status()
     if not ready:
-        print(f"[Google Calendar] Skipped event creation: {reason}")
+        logger.info("[Google Calendar] Skipped event creation: %s", reason)
         return None
 
     start, end = _appointment_window(approval.get("date_str"), approval.get("time_str"))

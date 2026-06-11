@@ -24,11 +24,14 @@ Integration contract (output):
 """
 
 import asyncio
+import logging
 import os
 import tempfile
 
 import httpx
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 from app.graph.scribe.nodes import (
     extract_entities_node,
@@ -86,17 +89,17 @@ async def process_consultation_bundle(bundle: dict) -> dict:
             temp_paths.append(path)
             transcript_text = await asyncio.to_thread(_transcribe_audio, path)
             audio_transcripts[url] = transcript_text
-            print(f"[ScribeService] Transcribed audio ({len(transcript_text)} chars): {url[:60]}...")
+            logger.info("[ScribeService] Transcribed audio (%d chars): %s...", len(transcript_text), url[:60])
         except Exception as exc:
-            print(f"[ScribeService] Transcription failed for {url[:60]}: {exc}")
+            logger.error("[ScribeService] Transcription failed for %s: %s", url[:60], exc)
             audio_transcripts[url] = ""
 
     # ── Step 3: Build combined consultation transcript ────────────────────────
     combined_transcript = _build_combined_transcript(messages, audio_transcripts)
-    print(f"[ScribeService] Combined transcript: {len(combined_transcript)} chars, {len(messages)} messages")
+    logger.info("[ScribeService] Combined transcript: %d chars, %d messages", len(combined_transcript), len(messages))
 
     if not combined_transcript.strip():
-        print("[ScribeService] Empty transcript — returning minimal result")
+        logger.warning("[ScribeService] Empty transcript — returning minimal result")
         _cleanup(temp_paths)
         return _empty_result()
 
@@ -122,7 +125,7 @@ async def process_consultation_bundle(bundle: dict) -> dict:
 
     pipeline_errors = state.get("errors", [])
     for err in pipeline_errors:
-        print(f"[ScribeService] Pipeline error: {err}")
+        logger.warning("[ScribeService] Pipeline error: %s", err)
 
     # ── Step 5: Store PDF and build public URL ────────────────────────────────
     soap_note_pdf_url = None
@@ -132,9 +135,9 @@ async def process_consultation_bundle(bundle: dict) -> dict:
             from app.services.clinical_scribe import store_scribe_pdf
             document_id, _ = store_scribe_pdf(pdf_path)
             soap_note_pdf_url = _public_pdf_url(document_id)
-            print(f"[ScribeService] PDF stored: {document_id} → {soap_note_pdf_url}")
+            logger.info("[ScribeService] PDF stored: %s → %s", document_id, soap_note_pdf_url)
         except Exception as exc:
-            print(f"[ScribeService] PDF storage failed: {exc}")
+            logger.error("[ScribeService] PDF storage failed: %s", exc)
 
     _cleanup(temp_paths)
 

@@ -16,7 +16,7 @@ try:
     from app.graph.parser.pipeline import lab_report_pipeline
 except ImportError:
     lab_report_pipeline = None
-    print("Warning: Could not import app.graph.parser.pipeline")
+    logging.getLogger(__name__).warning("[Parser] Could not import app.graph.parser.pipeline")
 
 from app.services.whatsapp import download_media_bytes
 
@@ -185,7 +185,7 @@ async def handle_incoming_pdf(
         if not await asyncio.to_thread(check_safety, temp_path):
             return "This document does not appear to be a valid lab report or could not be verified for safety."
 
-        print(f"[Parser] Invoking pipeline for {temp_path}")
+        logger.info("[Parser] Invoking pipeline for %s", temp_path)
         final_state = await asyncio.to_thread(
             lab_report_pipeline.invoke, {"pdf_path": temp_path, "llm_enc_key": llm_enc_key}
         )
@@ -228,7 +228,7 @@ async def handle_incoming_pdf(
                     pdf_url=pdf_url,
                 )
         except Exception as _le:
-            print(f"[PDF] Could not save lab record: {_le}")
+            logger.warning("[PDF] Could not save lab record: %s", _le)
 
         criticals = final_state.get("criticals", [])
         if criticals:
@@ -334,7 +334,7 @@ def _forward_report_to_doctor(
                 f"Original lab report — {patient_name}",
                 from_number=clinic_twilio_number,
             )
-        print(f"[Parser] Report forwarded to doctor {number}")
+        logger.info("[Parser] Report forwarded to doctor %s", number)
         # Set reply context so the doctor can type a free-form reply that
         # goes straight back to the patient — no MSG command needed.
         if from_number:

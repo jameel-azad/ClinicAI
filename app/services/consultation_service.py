@@ -11,12 +11,15 @@ can be tested end-to-end without Jameel's API being ready.
 """
 
 import asyncio
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -55,7 +58,7 @@ async def _call_jameel(bundle: dict) -> dict:
         try:
             return await process_consultation_bundle(bundle)
         except Exception as exc:
-            print(f"[ConsultationService] Local scribe pipeline failed: {exc}")
+            logger.error("[ConsultationService] Local scribe pipeline failed: %s", exc)
             return {
                 "soap_note_pdf_url": None,
                 "follow_up_questions": [],
@@ -71,7 +74,7 @@ async def _call_jameel(bundle: dict) -> dict:
             resp.raise_for_status()
             return resp.json()
     except Exception as exc:
-        print(f"[ConsultationService] Jameel API call failed: {exc}")
+        logger.error("[ConsultationService] Jameel API call failed: %s", exc)
         return {
             "soap_note_pdf_url": None,
             "follow_up_questions": [],
@@ -132,7 +135,7 @@ async def finalize_and_send(patient_number: str) -> str:
         )
 
     send_whatsapp_message_sync(session.doctor_number, doctor_summary, from_number=getattr(session, "clinic_twilio_number", None))
-    print(f"[ConsultationService] Summary sent to doctor {session.doctor_number}")
+    logger.info("[ConsultationService] Summary sent to doctor %s", session.doctor_number)
 
     booking_session = get_session(patient_number)
     if booking_session:
@@ -164,10 +167,10 @@ async def finalize_and_send(patient_number: str) -> str:
                 soap_result=result,
             )
     except Exception as _exc:
-        print(f"[ConsultationService] Non-fatal: failed to save patient record: {_exc}")
+        logger.warning("[ConsultationService] Non-fatal: failed to save patient record: %s", _exc)
 
     delete_consultation(patient_number, clinic_id=getattr(session, "clinic_id", None))
-    print(f"[ConsultationService] ConsultationSession deleted for {patient_number}")
+    logger.info("[ConsultationService] ConsultationSession deleted for %s", patient_number)
 
     return (
         "Your consultation has been recorded. "

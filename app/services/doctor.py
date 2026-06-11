@@ -1,7 +1,10 @@
+import logging
 import os
 import re
 
 import re as _re
+
+logger = logging.getLogger(__name__)
 
 def _strip_dr(name: str) -> str:
     """Remove leading 'Dr.' / 'Dr ' so templates can add it once consistently."""
@@ -228,7 +231,7 @@ def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str, c
         )
 
     delete_pending_lab_review(lab_id)
-    print(f"[lab_ack] {lab_id} acknowledged by {doctor_number}, patient {patient_number} notified")
+    logger.info("[lab_ack] %s acknowledged by %s, patient %s notified", lab_id, doctor_number, patient_number)
     return f"✅ Acknowledged. {patient_name.capitalize()} has been notified."
 
 

@@ -1,8 +1,11 @@
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+
+_log = logging.getLogger(__name__)
 from langgraph.graph import StateGraph, START, END
 
 from app.schemas import BookingState
@@ -50,13 +53,13 @@ def queue_node(state: BookingState) -> dict:
 
     if assigned_doctor:
         queue_after_hours_message(assigned_doctor, from_number, message, metadata=clinic_meta)
-        print(f"[AfterHours] Queued message from {from_number} for assigned doctor {assigned_doctor}")
+        _log.info("[AfterHours] Queued message from %s for assigned doctor %s", from_number, assigned_doctor)
     else:
         # No appointment context — queue to all doctors so any can respond
         all_nums = all_doctor_numbers()
         for doc_num in all_nums:
             queue_after_hours_message(doc_num, from_number, message, metadata=clinic_meta)
-        print(f"[AfterHours] No appointment found — queued message from {from_number} to all {len(all_nums)} doctor(s)")
+        _log.info("[AfterHours] No appointment found — queued message from %s to all %d doctor(s)", from_number, len(all_nums))
 
     return {
         "pipeline_log": [f"after_hours_agent: queued message from {from_number}"],

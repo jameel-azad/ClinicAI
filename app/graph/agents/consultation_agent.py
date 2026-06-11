@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -5,6 +6,8 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+
+_log = logging.getLogger(__name__)
 from langgraph.graph import StateGraph, START, END
 
 from app.schemas import BookingSession, BookingState, ConsultationMessage, ConsultationSession
@@ -117,7 +120,7 @@ def start_or_resume_node(state: BookingState) -> dict:
         booking.journey_state = "CONSULTATION_ACTIVE"
         save_session(booking)
 
-    print(f"[ConsultationAgent] New consultation {consultation_id} started for {from_number}")
+    _log.info("[ConsultationAgent] New consultation %s started for %s", consultation_id, from_number)
     return {
         "session": booking.model_dump() if booking else state.get("session"),
         "pipeline_log": [f"consultation_agent: new consultation {consultation_id} started"],
@@ -167,7 +170,7 @@ def detect_end_node(state: BookingState) -> dict:
         save_consultation(from_number, session)
         from app.services.scheduler import cancel_consultation_timeout
         cancel_consultation_timeout(from_number)
-        print(f"[ConsultationAgent] Closing phrase detected — ending consultation {session.consultation_id}")
+        _log.info("[ConsultationAgent] Closing phrase detected — ending consultation %s", session.consultation_id)
 
     return {
         "pipeline_log": [f"consultation_agent/detect_end: is_active={session.is_active}"],
@@ -189,7 +192,7 @@ def finalize_node(state: BookingState) -> dict:
     try:
         patient_reply = run_async(finalize_and_send(from_number), timeout=90)
     except Exception as exc:
-        print(f"[ConsultationAgent] finalize_and_send failed: {exc}")
+        _log.error("[ConsultationAgent] finalize_and_send failed: %s", exc)
         patient_reply = "Your consultation has been recorded. The doctor will follow up shortly. 🙏"
 
     return {

@@ -1,4 +1,6 @@
+import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from importlib import import_module
 from typing import Any
@@ -6,6 +8,32 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+_log = logging.getLogger(__name__)
+
+
+# ── Startup env-var validation ─────────────────────────────────────────────────
+_REQUIRED_ENV_VARS = [
+    "GROQ_API_KEY",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_WHATSAPP_FROM",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "SECRET_KEY",
+    "ENCRYPTION_KEY",
+    "PUBLIC_BASE_URL",
+]
+
+def _check_env_vars() -> None:
+    missing = [v for v in _REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
+    if missing:
+        lines = "\n".join(f"  - {v}" for v in missing)
+        msg = f"FATAL: Missing required environment variables:\n{lines}\nSet them in .env and restart."
+        print(msg, file=sys.stderr, flush=True)
+        sys.exit(1)
+
+_check_env_vars()
 
 from app.api.auth_router import router as auth_router
 from app.api.clinic_router import router as clinic_router
@@ -61,11 +89,11 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as _exc:
-        print(f"  [WARN] DB table creation failed: {_exc}")
+        _log.warning("[Startup] DB table creation failed: %s", _exc)
 
-    print("=" * 60)
-    print("  ClinicAI - Sprint 2 Multi-Agent System")
-    print("=" * 60)
+    _log.info("=" * 60)
+    _log.info("  ClinicAI - Sprint 2 Multi-Agent System")
+    _log.info("=" * 60)
 
     # ── Sync DB doctors into identity cache + Redis store ──────────────────
     try:
@@ -82,9 +110,9 @@ async def lifespan(app: FastAPI):
         refresh_db_doctors_cache(_db_doctors)
         from app.services.doctor_directory import reset_store_to_db_doctors
         reset_store_to_db_doctors(_db_doctors)
-        print(f"  Loaded {len(_db_doctors)} doctor(s) from DB — stale/demo profiles cleared")
+        _log.info("[Startup] Loaded %d doctor(s) from DB — stale/demo profiles cleared", len(_db_doctors))
     except Exception as _exc:
-        print(f"  [WARN] DB doctor sync failed: {_exc}")
+        _log.warning("[Startup] DB doctor sync failed: %s", _exc)
 
     # ── Verify WhatsApp Content Template approval status ──────────────────
     try:
@@ -98,22 +126,22 @@ async def lifespan(app: FastAPI):
                 continue
             _status = await check_content_template_approval(_csid)
             if _status == "approved":
-                print(f"  Template {_name} ({_csid[:12]}...): APPROVED ✓")
+                _log.info("[Startup] Template %s (%s...): APPROVED", _name, _csid[:12])
             elif _status == "unknown":
-                print(f"  Template {_name} ({_csid[:12]}...): status unknown (check Twilio console)")
+                _log.warning("[Startup] Template %s (%s...): status unknown (check Twilio console)", _name, _csid[:12])
             else:
-                print(
-                    f"  [WARN] Template {_name} ({_csid[:12]}...): status={_status.upper()} — "
-                    "messages to doctors will be UNDELIVERED until approved by WhatsApp/Meta. "
-                    "Go to Twilio Console → Content Template Builder → Submit for approval."
+                _log.warning(
+                    "[Startup] Template %s (%s...): status=%s — "
+                    "messages to doctors will be UNDELIVERED until approved by WhatsApp/Meta.",
+                    _name, _csid[:12], _status.upper(),
                 )
     except Exception as _exc:
-        print(f"  [WARN] Template approval check failed: {_exc}")
+        _log.warning("[Startup] Template approval check failed: %s", _exc)
 
     if scheduler is not None:
         if not getattr(scheduler, "running", False):
             scheduler.start()
-        print("  APScheduler ready — reminder + consultation timeout + after-hours flush + weekly insights jobs available")
+        _log.info("[Startup] APScheduler ready — reminder + consultation timeout + after-hours flush + weekly insights jobs available")
 
         # Register after-hours flush and weekly insights for ALL doctors (env + DB)
         try:
@@ -123,21 +151,21 @@ async def lifespan(app: FastAPI):
                 schedule_afterhours_flush(doc_num)
                 schedule_weekly_insights(doc_num)
         except Exception as _exc:
-            print(f"  [WARN] Scheduler job registration failed: {_exc}")
+            _log.warning("[Startup] Scheduler job registration failed: %s", _exc)
 
-    print(f"  Classifier graph nodes: {_graph_nodes(classifier_graph)}")
+    _log.info("[Startup] Classifier graph nodes: %s", _graph_nodes(classifier_graph))
     if booking_graph is not None:
-        print(f"  Router graph nodes    : {_graph_nodes(booking_graph)}")
+        _log.info("[Startup] Router graph nodes    : %s", _graph_nodes(booking_graph))
     else:
-        print("  Router graph          : not configured")
-    print("  Agents: BookingAgent | ConsultationAgent | EmergencyAgent | AfterHoursAgent | LabAgent | FollowUpAgent")
-    print("=" * 60)
+        _log.info("[Startup] Router graph          : not configured")
+    _log.info("[Startup] Agents: BookingAgent | ConsultationAgent | EmergencyAgent | AfterHoursAgent | LabAgent | FollowUpAgent")
+    _log.info("=" * 60)
 
     yield
 
     if scheduler is not None and getattr(scheduler, "running", False):
         scheduler.shutdown(wait=False)
-    print("ClinicAI shutting down.")
+    _log.info("ClinicAI shutting down.")
 
 
 app = FastAPI(

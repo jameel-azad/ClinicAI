@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import os
 import re
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 from app.schemas import AppointmentRecord, BookingSession
 from app.services.google_calendar import (
@@ -266,7 +269,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
     }
     save_pending_approval(approval)
 
-    print(f"[Approval] Sending request {approval_id} to doctor {doctor_number}")
+    logger.info("[Approval] Sending request %s to doctor %s", approval_id, doctor_number)
     sent = send_approval_request_sync(
         doctor_number,
         approval_id,
@@ -277,7 +280,7 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         session.doctor_name or "",
         clinic_twilio_number=session.clinic_twilio_number,
     )
-    print(f"[Approval] Message sent={sent} to doctor {doctor_number}")
+    logger.info("[Approval] Message sent=%s to doctor %s", sent, doctor_number)
 
     return (
         f"Thanks. {availability_reason} I have sent this appointment request "
@@ -407,7 +410,7 @@ def is_slot_available(
             cal_id = profile.get("google_calendar_id") or None
             return check_google_availability(date_str, time_str, calendar_id=cal_id)
         except Exception as exc:
-            print(f"[WARN] Google Calendar check failed, falling back to local: {exc}")
+            logger.warning("[Approval] Google Calendar check failed, falling back to local: %s", exc)
             # Fall through to local calendar check below
 
     for appt in all_appointments().values():
@@ -486,16 +489,16 @@ def _approve(approval: dict) -> str:
                     timeout=10,
                 )
             except Exception as _pe:
-                print(f"[WARN] Could not persist patient on approval: {_pe}")
+                logger.warning("[Approval] Could not persist patient on approval: %s", _pe)
         except Exception as _pe:
-            print(f"[WARN] Could not persist patient on approval: {_pe}")
+            logger.warning("[Approval] Could not persist patient on approval: %s", _pe)
     profile = find_doctor_profile_by_name(approval.get("doctor_name", "")) or {}
     cal_id = profile.get("google_calendar_id") or None
     try:
         google_event_id = create_google_calendar_event(approval, calendar_id=cal_id)
     except Exception as exc:
         # A calendar hiccup must never block the confirmation the patient is waiting for.
-        print(f"[WARN] Google Calendar event creation failed for {appointment_id}: {exc}")
+        logger.warning("[Approval] Google Calendar event creation failed for %s: %s", appointment_id, exc)
         google_event_id = None
     update_pending_approval(
         appointment_id,

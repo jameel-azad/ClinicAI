@@ -40,7 +40,7 @@ ClinicAI is a WhatsApp-native clinic management system built on FastAPI and Lang
                         ┌─────────────────────────────────────┐
                         │       Next.js Dashboard              │
                         │  Doctor → Browser → FastAPI REST     │
-                        │  Auth | Patients | Records | Config  │
+                        │  Auth | Patients | Appointments | Config│
                         └─────────────────────────────────────┘
 
 LLM:  Groq LLaMA 3.3 70B (primary)  +  Gemini 2.5 Flash (fallback)
@@ -79,8 +79,9 @@ STT:  Groq Whisper large-v3
 
 ### Patient-Facing (WhatsApp)
 
-- **Appointment booking** — Multi-turn conversational booking in English and Hinglish. Collects name, preferred date, time, symptoms, and routes to doctor approval.
-- **Appointment management** — Cancel, reschedule, or check booking status over WhatsApp.
+- **Appointment booking** — Multi-turn conversational booking in English and Hinglish. Collects name, preferred date, time, symptoms, and routes to doctor approval. A patient can hold multiple active appointments with different doctors simultaneously.
+- **Multiple appointment support** — Booking a second appointment (different doctor or specialty) while one is already confirmed is fully supported. The system prevents duplicate bookings (same patient + same doctor + same date/time) and guides the patient to choose a slot with suggestions if the requested one is taken.
+- **Appointment management** — Cancel, reschedule, or check status over WhatsApp. When a patient has multiple active appointments, the bot presents a numbered selection list so they can target the correct one.
 - **Consultation flow** — Send text messages and voice notes during an open consultation session. The doctor responds via WhatsApp; all messages are buffered and converted to a SOAP note on close.
 - **Lab report upload** — Send a PDF lab report as a WhatsApp attachment. The system extracts results, flags critical values (CBC, LFT, KFT, Lipid, Thyroid), summarises them with Groq, and forwards to the doctor.
 - **After-hours queue** — Messages sent outside clinic hours are queued in Redis and re-injected automatically at opening time.
@@ -101,6 +102,7 @@ STT:  Groq Whisper large-v3
 - **Clinic onboarding wizard** — Five-step flow: clinic details, add doctors, Twilio number, AI model selection, confirmation.
 - **Doctor management** — CRUD for doctors including specialty, WhatsApp number, working hours, appointment duration, and buffer time.
 - **Per-clinic AI model configuration** — Select vendor (Groq / Anthropic / OpenAI / Google), model name, STT model, and store encrypted API keys. Test the live connection directly from the UI.
+- **Appointments dashboard** — Dedicated appointments page listing all clinic appointments with filters by status (active / cancelled / completed) and doctor name. Admins can cancel or mark appointments complete directly from the dashboard. Appointment data is persisted to PostgreSQL (write-through on doctor approval).
 - **Patient list** — Searchable, paginated table of all patients with name, phone number, last consultation date, and record count.
 - **Patient detail** — Full profile (allergies, chronic conditions, current medications, blood group, doctor notes) and a reverse-chronological medical records timeline.
 - **Medical records timeline** — Each consultation record shows SOAP sections (S/O/A/P), confidence score, diagnosis chips with SNOMED codes, medication chips with RxNorm codes, and a link to the generated PDF.
@@ -207,6 +209,29 @@ STT:  Groq Whisper large-v3
 | created_at | DateTime(tz) | |
 | last_visit_at | DateTime(tz) | Nullable; updated per consultation |
 
+### `appointments`
+
+| Column | Type | Notes |
+|---|---|---|
+| id | String (PK) | `APTxxxxx` format — matches the Redis appointment_id |
+| clinic_id | String (FK → clinics) | Indexed |
+| patient_id | String (FK → patients) | Nullable; resolved on confirmation |
+| doctor_id | String (FK → doctors) | Nullable; resolved by name lookup |
+| from_number | String(30) | Patient WhatsApp number; indexed |
+| patient_name | String(255) | Denormalized; nullable |
+| doctor_name | String(255) | Denormalized |
+| date_str | String(100) | Human-readable date as provided by the patient (e.g. `18 June 2026`) |
+| time_str | String(50) | Human-readable time (e.g. `10:00 AM`) |
+| appointment_datetime | DateTime | Parsed from date_str + time_str at save time; used for sorting and dedup |
+| symptoms | JSON | Array of symptom strings |
+| status | String(20) | `active` / `cancelled` / `completed`; default `active`; indexed |
+| confirmed_at | DateTime(tz) | When the doctor approved the appointment |
+| reminder_sent | Boolean | Whether the scheduled reminder was delivered |
+| created_at | DateTime(tz) | |
+| updated_at | DateTime(tz) | Auto-updated |
+
+Unique constraint: `(clinic_id, from_number, doctor_name, appointment_datetime)` — prevents a patient from booking the same doctor at the same slot twice even across sessions.
+
 ### `medical_records`
 
 | Column | Type | Notes |
@@ -281,6 +306,15 @@ STT:  Groq Whisper large-v3
 | PUT | `/api/clinics/{id}/patients/{patient_id}` | Partial update of patient profile |
 | GET | `/api/clinics/{id}/patients/{patient_id}/records` | Medical records timeline (optional `type` filter) |
 
+### Appointments (`/api/clinics/{clinic_id}/appointments`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/clinics/{id}/appointments/` | List appointments with optional filters: `status`, `doctor_name`, `from_date`, `to_date`, `skip`, `limit` |
+| GET | `/api/clinics/{id}/appointments/{appointment_id}` | Single appointment detail |
+| PUT | `/api/clinics/{id}/appointments/{appointment_id}` | Update appointment status (`active` / `cancelled` / `completed`) — updates both PostgreSQL and Redis |
+| GET | `/api/clinics/{id}/appointments/patient/{patient_id}` | All appointments for a specific patient |
+
 ### WhatsApp & Clinical
 
 | Method | Path | Description |
@@ -319,6 +353,7 @@ STT:  Groq Whisper large-v3
 | `/dashboard/doctors` | Doctors CRUD: list, invite, edit, deactivate |
 | `/dashboard/patients` | Patient list: searchable table with name, phone, last consult |
 | `/dashboard/patients/[id]` | Patient detail: full profile, medical records, allergies, notes |
+| `/dashboard/appointments` | Appointments table: filter by status/doctor, cancel or complete from dashboard |
 | `/dashboard/config` | AI Config: model selection, API key input, connection test |
 | `/admin` | Super-admin: list all clinics, toggle active/inactive |
 | `/admin/clinics/[id]` | Per-clinic detail view for super-admin |
@@ -329,7 +364,7 @@ STT:  Groq Whisper large-v3
 | `/docs/ai-models` | Documentation on supported AI models |
 | `/docs/twilio-setup` | Twilio/WhatsApp configuration walkthrough |
 
-Dashboard sidebar navigation: Overview, Doctors, Patients, AI Config, Documentation.
+Dashboard sidebar navigation: Overview, Doctors, Patients, Appointments, AI Config, Documentation.
 
 ---
 
@@ -450,10 +485,12 @@ https://<ngrok-id>.ngrok-free.app/webhook/twilio
 2. Send any greeting (`hi`, `hello`) to receive a welcome message.
 3. To book: say `I want to book an appointment with Dr [Name]` and follow the conversational prompts for date, time, and symptoms.
 4. Once the doctor approves, receive a confirmation with date and time. A reminder is sent automatically before the appointment.
-5. During the appointment, continue the conversation over WhatsApp. Send voice notes or text describing symptoms.
-6. To close the consultation, send a closing phrase such as `ok done`, `take care`, or `bye`. The SOAP note is generated and the doctor reviews the PDF before sending it back.
-7. To upload a lab report, send the PDF as a WhatsApp attachment. The system extracts results and forwards them to the doctor.
-8. For follow-up queries after a consultation, send a message and the bot responds with context from the last visit.
+5. To book a second appointment with a different doctor (e.g. orthopedic while waiting for a cardiology appointment), just say `book appointment` again. The bot starts a fresh booking flow while keeping the existing appointment intact.
+6. To cancel or reschedule, say `cancel` or `reschedule`. If you have multiple active appointments, the bot shows a numbered list — reply with the number to target the right one.
+7. During the appointment, continue the conversation over WhatsApp. Send voice notes or text describing symptoms.
+8. To close the consultation, send a closing phrase such as `ok done`, `take care`, or `bye`. The SOAP note is generated and the doctor reviews the PDF before sending it back.
+9. To upload a lab report, send the PDF as a WhatsApp attachment. The system extracts results and forwards them to the doctor.
+10. For follow-up queries after a consultation, send a message and the bot responds with context from the last visit.
 
 ---
 
@@ -474,7 +511,8 @@ https://<ngrok-id>.ngrok-free.app/webhook/twilio
 3. Manage doctors at `/dashboard/doctors` — add, edit, or deactivate.
 4. Browse patients at `/dashboard/patients` — search by name or phone number.
 5. Open a patient detail page to view the full medical history timeline including SOAP notes, diagnoses with SNOMED codes, medications with RxNorm codes, and lab report values.
-6. Configure or change the AI model and API keys at `/dashboard/config` and test the connection live.
+6. View all clinic appointments at `/dashboard/appointments`. Filter by status or doctor name, and cancel or mark appointments complete directly from the table.
+7. Configure or change the AI model and API keys at `/dashboard/config` and test the connection live.
 
 ---
 
@@ -484,13 +522,15 @@ Every interaction that creates clinical data is automatically persisted — no m
 
 1. **First WhatsApp contact**: When a patient messages for the first time, `upsert_patient` creates a `Patient` row for `(clinic_id, phone_number)`. The name is updated whenever it becomes known (e.g., from the booking flow).
 
-2. **Each consultation**: When a consultation closes (via closing phrase or inactivity timeout), `patient_service` is called from the consultation service. A `MedicalRecord` row with `record_type="consultation"` is written containing the full SOAP note, clinical entities (symptoms, diagnoses, medications), SNOMED/RxNorm codes, confidence scores, the FHIR bundle, and a link to the generated PDF. `Patient.last_visit_at` is updated.
+2. **Appointment confirmation**: When a doctor approves an appointment, an `Appointment` row is written to PostgreSQL (write-through from Redis) with `status="active"`. The appointment is simultaneously kept in Redis for fast lookup during the WhatsApp conversation flow. Cancellations and reschedules update `status` in both stores.
 
-3. **Lab reports**: When a lab PDF is processed, a `MedicalRecord` with `record_type="lab_report"` is written containing the panel type, all values, and flagged abnormals and criticals.
+3. **Each consultation**: When a consultation closes (via closing phrase or inactivity timeout), `patient_service` is called from the consultation service. A `MedicalRecord` row with `record_type="consultation"` is written containing the full SOAP note, clinical entities (symptoms, diagnoses, medications), SNOMED/RxNorm codes, confidence scores, the FHIR bundle, and a link to the generated PDF. `Patient.last_visit_at` is updated.
 
-4. **Dashboard view**: The doctor opens the patient detail page and sees a reverse-chronological timeline of all records across all visits, with structured clinical data rendered as coded chips and color-coded lab values.
+4. **Lab reports**: When a lab PDF is processed, a `MedicalRecord` with `record_type="lab_report"` is written containing the panel type, all values, and flagged abnormals and criticals.
 
-Medical history accumulates automatically from both the consultation flow and the lab report flow without any manual effort from the doctor or clinic staff.
+5. **Dashboard view**: The doctor opens the patient detail page for the full medical history timeline, and the appointments page for all upcoming and past appointments — all rendered from PostgreSQL.
+
+Data accumulates automatically from every patient interaction without any manual effort from the doctor or clinic staff.
 
 ---
 
@@ -498,6 +538,7 @@ Medical history accumulates automatically from both the consultation flow and th
 
 - **APScheduler state is in-memory** — Scheduled jobs (reminders, no-show recovery, weekly insights) are lost if the server restarts. A Redis jobstore would make them durable.
 - **LangGraph MemorySaver is in-RAM** — Booking sub-graph thread checkpoints are lost on server restart. A `RedisSaver` or `PostgresSaver` would provide persistence.
+- **MedicalRecord has no appointment_id foreign key** — Consultation records link to the patient but not to a specific appointment. Adding an `appointment_id` column to `medical_records` would close the appointment → consultation → SOAP chain.
 - **No test suite** — There are no automated unit or integration tests. The pipeline is verified manually (see the existing detailed test guide in the repository).
 - **Doctor-side consultation close not wired** — The doctor cannot currently send a closing phrase from their side to finalize a consultation; the close must come from the patient side or via timeout.
 - **No CI/CD pipeline** — There is no automated build, test, or deployment pipeline configured.

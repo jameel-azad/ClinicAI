@@ -80,6 +80,25 @@ export interface ModelConfigUpdatePayload {
   google_api_key?: string;
 }
 
+export interface Appointment {
+  id: string;
+  clinic_id: string;
+  patient_id: string | null;
+  doctor_id: string | null;
+  from_number: string;
+  patient_name: string | null;
+  doctor_name: string;
+  date_str: string;
+  time_str: string;
+  appointment_datetime: string | null;
+  symptoms: string[] | null;
+  status: "active" | "cancelled" | "completed";
+  confirmed_at: string;
+  reminder_sent: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Me {
   id: string;
   email: string;

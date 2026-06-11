@@ -18,6 +18,8 @@ from app.services.appointment_approval import (
 )
 from app.services.store import (
     cancel_appointment,
+    get_appointment,
+    get_active_appointments_for_patient,
     get_latest_appointment_for_patient,
     get_latest_approval_for_patient,
     update_pending_approval,
@@ -329,6 +331,43 @@ def _get_resume_message(session_dict: dict) -> str:
     return MSG_GREETING
 
 
+def _fire_db_status_update(appointment_id: str, status: str, _context=None) -> None:
+    """Fire-and-forget PostgreSQL status update for a cancelled/completed appointment."""
+    try:
+        import asyncio
+        from app.services.patient_service import update_appointment_status_in_db
+        loop = asyncio.get_running_loop()
+        loop.create_task(update_appointment_status_in_db(appointment_id, status))
+    except RuntimeError:
+        try:
+            from app.services.async_runner import run_async
+            from app.services.patient_service import update_appointment_status_in_db
+            run_async(update_appointment_status_in_db(appointment_id, status), timeout=5)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _format_appointment_list(appts: list) -> str:
+    """Format a numbered list of appointments for WhatsApp selection."""
+    lines = ["Which appointment?\n"]
+    for i, a in enumerate(appts, 1):
+        lines.append(f"*{i}.* {a.doctor_name} — {a.date_str} at {a.time_str}")
+    lines.append("\nReply with the number (e.g. *1*).")
+    return "\n".join(lines)
+
+
+def _parse_selection(message: str, max_count: int):
+    """Return 0-based index from a 1-based reply, or None if invalid."""
+    stripped = message.strip()
+    if stripped.isdigit():
+        n = int(stripped)
+        if 1 <= n <= max_count:
+            return n - 1
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # NODES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -464,6 +503,44 @@ def flow_node(state: BookingState) -> dict:
     # ── END COLLECT_DOCTOR_PREFERENCE ────────────────────────────────────────
 
     if booking_state == "BOOKED":
+        if intent == "appointment_book":
+            # Patient wants another appointment — start a fresh booking, keep identity
+            fresh = BookingSession(
+                from_number=from_number,
+                clinic_id=session_dict.get("clinic_id"),
+                clinic_twilio_number=session_dict.get("clinic_twilio_number"),
+                patient_name=session_dict.get("patient_name"),
+                journey_state="BOOKING_IN_PROGRESS",
+            )
+            return {
+                "session": fresh.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": MSG_START_BOOKING,
+                "pipeline_log": ["flow_node: BOOKED patient starting additional booking"],
+            }
+        # Status check or unrecognised message — show all active appointments
+        active_appts = get_active_appointments_for_patient(from_number)
+        if active_appts:
+            if len(active_appts) == 1:
+                a = active_appts[0]
+                reply = (
+                    f"✅ *Your appointment is confirmed!*\n\n"
+                    f"👨‍⚕️ Doctor : *{a.doctor_name}*\n"
+                    f"📅 Date   : *{a.date_str}*\n"
+                    f"🕐 Time   : *{a.time_str}*\n\n"
+                    "We'll send you a reminder before your appointment. 🙏"
+                )
+            else:
+                lines = [f"✅ *You have {len(active_appts)} upcoming appointments:*\n"]
+                for idx, a in enumerate(active_appts, 1):
+                    lines.append(f"*{idx}.* {a.doctor_name} — {a.date_str} at {a.time_str}")
+                lines.append("\nReply *cancel* or *reschedule* to manage one, or *book* for another.")
+                reply = "\n".join(lines)
+            return {
+                "current_booking_state": "BOOKED",
+                "reply_message": reply,
+                "pipeline_log": ["flow_node: BOOKED — showed active appointment summary"],
+            }
         return {
             "current_booking_state": "BOOKED",
             "reply_message": "You already have a confirmed appointment! We'll send you a reminder. 😊",
@@ -721,6 +798,40 @@ def reschedule_node(state: BookingState) -> dict:
     message = state["incoming_message"]
     session_dict = state.get("session") or {}
     booking_state = session_dict.get("state", "GREETING")
+    clinic_twilio_number = state.get("clinic_twilio_number")
+
+    if booking_state == "SELECT_APPOINTMENT_RESCHEDULE":
+        active_appts = get_active_appointments_for_patient(from_number)
+        if not active_appts:
+            return {
+                "reply_message": MSG_NO_RESCHEDULE,
+                "pipeline_log": ["reschedule_node: no active appointments during selection"],
+            }
+        idx = _parse_selection(message, len(active_appts))
+        if idx is None:
+            return {
+                "current_booking_state": "SELECT_APPOINTMENT_RESCHEDULE",
+                "reply_message": (
+                    f"Please reply with a number between 1 and {len(active_appts)}.\n\n"
+                    + _format_appointment_list(active_appts)
+                ),
+                "pipeline_log": ["reschedule_node: invalid selection, re-asked"],
+            }
+        chosen = active_appts[idx]
+        session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+        session.state = "RESCHEDULE_COLLECTING"
+        session.selected_appointment_id = chosen.appointment_id
+        session.requested_date = chosen.date_str
+        session.requested_time = chosen.time_str
+        session.doctor_name = chosen.doctor_name
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "RESCHEDULE_COLLECTING",
+            "reply_message": MSG_RESCHEDULE_START.format(
+                doctor=chosen.doctor_name, date=chosen.date_str, time=chosen.time_str,
+            ),
+            "pipeline_log": [f"reschedule_node: selection {idx + 1} → {chosen.appointment_id}"],
+        }
 
     if booking_state == "RESCHEDULE_COLLECTING":
         session = BookingSession(**session_dict)
@@ -775,10 +886,12 @@ def reschedule_node(state: BookingState) -> dict:
         session = BookingSession(**session_dict)
 
         if _is_affirmative(message):
-            appt = get_latest_appointment_for_patient(from_number)
+            selected_id = session_dict.get("selected_appointment_id")
+            appt = get_appointment(selected_id) if selected_id else get_latest_appointment_for_patient(from_number)
             if appt:
                 cancel_appointment(appt.appointment_id)
                 cancel_reminder(appt.appointment_id)
+                _fire_db_status_update(appt.appointment_id, "cancelled")
 
             session.requested_date = session.new_requested_date
             session.requested_time = session.new_requested_time
@@ -833,22 +946,38 @@ def reschedule_node(state: BookingState) -> dict:
             "pipeline_log": ["reschedule_node: started from WAITING state"],
         }
 
-    appt = get_latest_appointment_for_patient(from_number)
-    if not appt:
+    active_appts = get_active_appointments_for_patient(from_number)
+    if not active_appts:
         return {
             "reply_message": MSG_NO_RESCHEDULE,
             "pipeline_log": ["reschedule_node: no appointment to reschedule"],
         }
 
     session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
-    session.state = "RESCHEDULE_COLLECTING"
+    if len(active_appts) == 1:
+        appt = active_appts[0]
+        session.state = "RESCHEDULE_COLLECTING"
+        session.selected_appointment_id = appt.appointment_id
+        session.requested_date = appt.date_str
+        session.requested_time = appt.time_str
+        session.doctor_name = appt.doctor_name
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "RESCHEDULE_COLLECTING",
+            "reply_message": MSG_RESCHEDULE_START.format(
+                doctor=appt.doctor_name, date=appt.date_str, time=appt.time_str,
+            ),
+            "pipeline_log": ["reschedule_node: single appointment, asked for new date/time"],
+        }
+
+    # Multiple active appointments — show selection list
+    session.state = "SELECT_APPOINTMENT_RESCHEDULE"
+    session.pending_action = "reschedule"
     return {
         "session": session.model_dump(),
-        "current_booking_state": "RESCHEDULE_COLLECTING",
-        "reply_message": MSG_RESCHEDULE_START.format(
-            doctor=appt.doctor_name, date=appt.date_str, time=appt.time_str,
-        ),
-        "pipeline_log": ["reschedule_node: asked for new date/time"],
+        "current_booking_state": "SELECT_APPOINTMENT_RESCHEDULE",
+        "reply_message": _format_appointment_list(active_appts),
+        "pipeline_log": [f"reschedule_node: {len(active_appts)} active appointments, showing selection"],
     }
 
 
@@ -863,11 +992,46 @@ def cancel_node(state: BookingState) -> dict:
     booking_state = session_dict.get("state", "GREETING")
 
     clinic_twilio_number = state.get("clinic_twilio_number")
+    if booking_state == "SELECT_APPOINTMENT_CANCEL":
+        active_appts = get_active_appointments_for_patient(from_number)
+        if not active_appts:
+            return {
+                "session": None,
+                "current_booking_state": "GREETING",
+                "reply_message": MSG_NO_APPOINTMENT,
+                "pipeline_log": ["cancel_node: no active appointments during selection"],
+            }
+        idx = _parse_selection(message, len(active_appts))
+        if idx is None:
+            return {
+                "current_booking_state": "SELECT_APPOINTMENT_CANCEL",
+                "reply_message": (
+                    f"Please reply with a number between 1 and {len(active_appts)}.\n\n"
+                    + _format_appointment_list(active_appts)
+                ),
+                "pipeline_log": ["cancel_node: invalid selection, re-asked"],
+            }
+        chosen = active_appts[idx]
+        session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+        session.state = "CANCEL_CONFIRM"
+        session.selected_appointment_id = chosen.appointment_id
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "CANCEL_CONFIRM",
+            "reply_message": MSG_CANCEL_CONFIRM.format(
+                doctor=chosen.doctor_name, date=chosen.date_str, time=chosen.time_str,
+            ),
+            "pipeline_log": [f"cancel_node: selection {idx + 1} → {chosen.appointment_id}"],
+        }
+
     if booking_state == "CANCEL_CONFIRM":
         if _is_affirmative(message):
-            appt = get_latest_appointment_for_patient(from_number)
+            selected_id = session_dict.get("selected_appointment_id")
+            appt = get_appointment(selected_id) if selected_id else get_latest_appointment_for_patient(from_number)
             if appt:
                 cancel_appointment(appt.appointment_id)
+                # Fire DB status update (fire-and-forget)
+                _fire_db_status_update(appt.appointment_id, "cancelled", clinic_twilio_number)
                 cancel_reminder(appt.appointment_id)
                 cancel_no_show_jobs(appt.appointment_id)
                 doctor_number = find_doctor_number(appt.doctor_name)
@@ -948,39 +1112,61 @@ def cancel_node(state: BookingState) -> dict:
             "pipeline_log": ["cancel_node: pending approval cancelled"],
         }
 
-    appt = get_latest_appointment_for_patient(from_number)
-    if not appt:
+    active_appts = get_active_appointments_for_patient(from_number)
+    if not active_appts:
         return {
             "reply_message": MSG_NO_APPOINTMENT,
             "pipeline_log": ["cancel_node: no appointment found"],
         }
 
     session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
-    session.state = "CANCEL_CONFIRM"
+    if len(active_appts) == 1:
+        appt = active_appts[0]
+        session.state = "CANCEL_CONFIRM"
+        session.selected_appointment_id = appt.appointment_id
+        return {
+            "session": session.model_dump(),
+            "current_booking_state": "CANCEL_CONFIRM",
+            "reply_message": MSG_CANCEL_CONFIRM.format(
+                doctor=appt.doctor_name, date=appt.date_str, time=appt.time_str,
+            ),
+            "pipeline_log": ["cancel_node: single appointment, asked for cancel confirmation"],
+        }
+
+    # Multiple active appointments — show selection list
+    session.state = "SELECT_APPOINTMENT_CANCEL"
+    session.pending_action = "cancel"
     return {
         "session": session.model_dump(),
-        "current_booking_state": "CANCEL_CONFIRM",
-        "reply_message": MSG_CANCEL_CONFIRM.format(
-            doctor=appt.doctor_name, date=appt.date_str, time=appt.time_str,
-        ),
-        "pipeline_log": ["cancel_node: asked for cancel confirmation"],
+        "current_booking_state": "SELECT_APPOINTMENT_CANCEL",
+        "reply_message": _format_appointment_list(active_appts),
+        "pipeline_log": [f"cancel_node: {len(active_appts)} active appointments, showing selection"],
     }
 
 
 def appointment_status_node(state: BookingState) -> dict:
     from_number = state["from_number"]
-    appt = get_latest_appointment_for_patient(from_number)
+    active_appts = get_active_appointments_for_patient(from_number)
 
-    if appt:
-        return {
-            "reply_message": (
+    if active_appts:
+        if len(active_appts) == 1:
+            appt = active_appts[0]
+            reply = (
                 f"✅ *Your appointment is confirmed!*\n\n"
                 f"👨‍⚕️ Doctor : *{appt.doctor_name}*\n"
                 f"📅 Date   : *{appt.date_str}*\n"
                 f"🕐 Time   : *{appt.time_str}*\n\n"
                 "We'll send you a reminder before your appointment. 🙏"
-            ),
-            "pipeline_log": ["appointment_status_node: confirmed appointment found"],
+            )
+        else:
+            lines = [f"✅ *You have {len(active_appts)} upcoming appointments:*\n"]
+            for i, a in enumerate(active_appts, 1):
+                lines.append(f"*{i}.* {a.doctor_name} — {a.date_str} at {a.time_str}")
+            lines.append("\nReply *cancel* or *reschedule* to manage one.")
+            reply = "\n".join(lines)
+        return {
+            "reply_message": reply,
+            "pipeline_log": [f"appointment_status_node: {len(active_appts)} active appointment(s) found"],
         }
 
     approval = get_latest_approval_for_patient(from_number)
@@ -1019,10 +1205,12 @@ def route_booking(
     if intent == "appointment_status":
         return "appointment_status_node"
 
-    if booking_state in ("RESCHEDULE_COLLECTING", "RESCHEDULE_CONFIRM"):
+    if booking_state in (
+        "SELECT_APPOINTMENT_RESCHEDULE", "RESCHEDULE_COLLECTING", "RESCHEDULE_CONFIRM"
+    ):
         return "reschedule_node"
 
-    if booking_state == "CANCEL_CONFIRM":
+    if booking_state in ("SELECT_APPOINTMENT_CANCEL", "CANCEL_CONFIRM"):
         return "cancel_node"
 
     if intent == "appointment_reschedule":

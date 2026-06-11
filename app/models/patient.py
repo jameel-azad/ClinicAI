@@ -8,6 +8,7 @@ from app.database import Base
 if TYPE_CHECKING:
     from app.models.clinic import Clinic
     from app.models.medical_record import MedicalRecord
+    from app.models.appointment import Appointment
 
 class Patient(Base):
     __tablename__ = "patients"
@@ -38,3 +39,4 @@ class Patient(Base):
 
     clinic: Mapped["Clinic"] = relationship(back_populates="patients")
     records: Mapped[list["MedicalRecord"]] = relationship(back_populates="patient", order_by="desc(MedicalRecord.visit_date)")
+    appointments: Mapped[list["Appointment"]] = relationship("Appointment", back_populates="patient")

@@ -227,8 +227,12 @@ def request_doctor_approval(session: BookingSession, patient_number: str) -> tup
         session.doctor_name,
         session.requested_date,
         session.requested_time,
+        patient_number=patient_number,
     )
     if not slot_available:
+        # Patient-level duplicate gets a clear, specific message without suggestions
+        if "You already have" in availability_reason:
+            return availability_reason, None
         suggestions = suggest_alternative_slots(
             patient_number,
             session.doctor_name,
@@ -400,6 +404,7 @@ def is_slot_available(
     doctor_name: str | None,
     date_str: str | None,
     time_str: str | None,
+    patient_number: str | None = None,
 ) -> tuple[bool, str]:
     if calendar_enabled():
         try:
@@ -415,7 +420,12 @@ def is_slot_available(
             _same(appt.get("doctor_name"), doctor_name)
             and _same_date(appt.get("date_str"), date_str)
             and _same_time(appt.get("time_str"), time_str)
+            and appt.get("status", "active") == "active"
         ):
+            # Same patient booking same slot again → duplicate
+            if patient_number and appt.get("from_number") == patient_number:
+                return False, f"You already have an appointment with Dr. {doctor_name} at that time."
+            # Different patient → slot taken by someone else
             return False, "Local calendar already has a confirmed appointment."
 
     for approval in get_waiting_approvals_for_doctor(find_doctor_number(doctor_name) or ""):
@@ -424,6 +434,8 @@ def is_slot_available(
             and _same_date(approval.get("date_str"), date_str)
             and _same_time(approval.get("time_str"), time_str)
         ):
+            if patient_number and approval.get("patient_number") == patient_number:
+                return False, f"You already have a pending request with Dr. {doctor_name} at that time."
             return False, "Local calendar already has a pending request for that slot."
 
     return True, "The local calendar shows this slot is free."
@@ -467,28 +479,23 @@ def _approve(approval: dict) -> str:
     )
     save_appointment(appt)
 
-    # Persist patient to DB on confirmed appointment (idempotent — unique on clinic+phone)
+    # Persist appointment (and patient) to PostgreSQL on confirmation
     clinic_id = approval.get("clinic_id")
     if clinic_id:
         try:
             import asyncio
-            from app.services.patient_service import upsert_patient
+            from app.services.patient_service import save_appointment_to_db
             loop = asyncio.get_running_loop()
-            loop.create_task(
-                upsert_patient(clinic_id, approval["patient_number"], approval.get("patient_name"))
-            )
+            loop.create_task(save_appointment_to_db(clinic_id, appt, approval))
         except RuntimeError:
-            # Called from a background thread — use run_async fallback
             try:
                 from app.services.async_runner import run_async
-                run_async(
-                    upsert_patient(clinic_id, approval["patient_number"], approval.get("patient_name")),
-                    timeout=10,
-                )
+                from app.services.patient_service import save_appointment_to_db
+                run_async(save_appointment_to_db(clinic_id, appt, approval), timeout=10)
             except Exception as _pe:
-                print(f"[WARN] Could not persist patient on approval: {_pe}")
+                print(f"[WARN] Could not persist appointment to DB: {_pe}")
         except Exception as _pe:
-            print(f"[WARN] Could not persist patient on approval: {_pe}")
+            print(f"[WARN] Could not persist appointment to DB: {_pe}")
     profile = find_doctor_profile_by_name(approval.get("doctor_name", "")) or {}
     cal_id = profile.get("google_calendar_id") or None
     try:

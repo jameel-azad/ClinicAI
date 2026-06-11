@@ -120,6 +120,8 @@ BOOKING_FLOW_STATES = [
     "CANCEL_CONFIRM",
     "RESCHEDULE_COLLECTING",
     "RESCHEDULE_CONFIRM",
+    "SELECT_APPOINTMENT_CANCEL",
+    "SELECT_APPOINTMENT_RESCHEDULE",
 ]
 
 # Patient journey states (high-level lifecycle — used by ConsultationAgent in Sprint 2)
@@ -164,6 +166,9 @@ class BookingSession(BaseModel):
     last_bot_response: Optional[str] = None    # for context-aware classification
     clinic_id: Optional[str] = None            # resolved from the Twilio "to" number
     clinic_twilio_number: Optional[str] = None  # clinic's own WhatsApp number — used as From in outbound messages
+    # multi-appointment selection: set when patient has 2+ active appointments
+    selected_appointment_id: Optional[str] = None
+    pending_action: Optional[str] = None       # "cancel" | "reschedule" held while patient selects
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -179,6 +184,9 @@ class AppointmentRecord(BaseModel):
     symptoms: Optional[list[str]]
     confirmed_at: datetime = Field(default_factory=datetime.now)
     reminder_sent: bool = False
+    status: Literal["active", "cancelled", "completed"] = "active"
+    appointment_datetime: Optional[datetime] = None  # parsed at save time for sorting/dedup
+    clinic_id: Optional[str] = None
 
 
 class BookingState(TypedDict):

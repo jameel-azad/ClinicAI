@@ -256,3 +256,90 @@ async def save_lab_record(
     except Exception as exc:
         logger.error("[patient_service] save_lab_record failed: %s", exc)
         return None
+
+
+async def save_appointment_to_db(
+    clinic_id: str,
+    appt,  # AppointmentRecord
+    approval: dict,
+) -> Optional[str]:
+    """
+    Persist a confirmed AppointmentRecord to PostgreSQL.
+    Resolves patient_id and doctor_id by looking up existing rows.
+    Upserts on the appointment primary key to handle retries safely.
+    Returns appointment id or None on failure.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.models.appointment import Appointment
+    from app.models.doctor import Doctor
+
+    try:
+        async with AsyncSessionLocal() as db:
+            patient_id = await upsert_patient(
+                clinic_id, appt.from_number, appt.patient_name, db=db
+            )
+
+            doctor_id: Optional[str] = None
+            dr_result = await db.execute(
+                select(Doctor).where(
+                    Doctor.clinic_id == clinic_id,
+                    Doctor.name == appt.doctor_name,
+                    Doctor.is_active == True,
+                )
+            )
+            doctor = dr_result.scalar_one_or_none()
+            if doctor:
+                doctor_id = doctor.id
+
+            stmt = pg_insert(Appointment).values(
+                id=appt.appointment_id,
+                clinic_id=clinic_id,
+                patient_id=patient_id,
+                doctor_id=doctor_id,
+                from_number=appt.from_number,
+                patient_name=appt.patient_name,
+                doctor_name=appt.doctor_name,
+                date_str=appt.date_str,
+                time_str=appt.time_str,
+                appointment_datetime=appt.appointment_datetime,
+                symptoms=appt.symptoms,
+                status=appt.status,
+                confirmed_at=appt.confirmed_at,
+                reminder_sent=appt.reminder_sent,
+            ).on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "status": appt.status,
+                    "reminder_sent": appt.reminder_sent,
+                    "updated_at": datetime.utcnow(),
+                },
+            )
+            await db.execute(stmt)
+            await db.commit()
+            logger.info(
+                "[patient_service] Persisted appointment %s for %s",
+                appt.appointment_id, appt.from_number,
+            )
+            return appt.appointment_id
+    except Exception as exc:
+        logger.error("[patient_service] save_appointment_to_db failed: %s", exc)
+        return None
+
+
+async def update_appointment_status_in_db(appointment_id: str, status: str) -> bool:
+    """Update the status of an appointment row in PostgreSQL."""
+    from app.models.appointment import Appointment
+    from sqlalchemy import update as sa_update
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                sa_update(Appointment)
+                .where(Appointment.id == appointment_id)
+                .values(status=status, updated_at=datetime.utcnow())
+            )
+            await db.commit()
+            return True
+    except Exception as exc:
+        logger.error("[patient_service] update_appointment_status_in_db failed: %s", exc)
+        return False

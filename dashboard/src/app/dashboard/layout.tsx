@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { LayoutDashboard, Users, Users2, Settings, BookOpen, Menu, LogOut, Stethoscope, DollarSign } from "lucide-react"
+import { LayoutDashboard, Users, Users2, Settings, BookOpen, Menu, LogOut, Stethoscope, DollarSign, CalendarDays } from "lucide-react"
 
 import { isAuthenticated, removeToken } from "@/lib/auth"
 import { useMe } from "@/hooks/useMe"
@@ -29,6 +29,7 @@ const navLinks = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard, exact: true },
   { label: "Doctors", href: "/dashboard/doctors", icon: Users, exact: false },
   { label: "Patients", href: "/dashboard/patients", icon: Users2, exact: false },
+  { label: "Appointments", href: "/dashboard/appointments", icon: CalendarDays, exact: false },
   { label: "AI Config", href: "/dashboard/config", icon: Settings, exact: false },
   { label: "Documentation", href: "/docs", icon: BookOpen, exact: false },
   { label: "Stack & Costs", href: "/stack", icon: DollarSign, exact: false },

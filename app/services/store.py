@@ -254,6 +254,8 @@ def all_sessions() -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def save_appointment(appt: AppointmentRecord) -> None:
+    if appt.appointment_datetime is None:
+        appt.appointment_datetime = _parse_appt_datetime(appt.date_str, appt.time_str)
     _rset(_key(f"appt:{appt.appointment_id}"), appt.model_dump())
     _sadd(_key(f"appts_by_phone:{appt.from_number}"), appt.appointment_id)
     _appointments[appt.appointment_id] = appt
@@ -319,29 +321,29 @@ def _parse_appt_datetime(date_str: str, time_str: str) -> Optional[datetime]:
         return None
 
 
-def get_latest_appointment_for_patient(from_number: str) -> Optional[AppointmentRecord]:
+def get_active_appointments_for_patient(from_number: str) -> list[AppointmentRecord]:
+    """Return all active (non-cancelled, non-completed) appointments sorted nearest-first."""
     appts = get_appointments_by_number(from_number)
-    if not appts:
-        return None
-    def _key_fn(a):
-        dt = _parse_appt_datetime(a.date_str, a.time_str)
-        # Use appointment datetime when parseable; fall back to confirmation time
-        return dt if dt is not None else a.confirmed_at.replace(tzinfo=None)
-    try:
-        return max(appts, key=_key_fn)
-    except TypeError:
-        return max(appts, key=lambda a: a.confirmed_at)
+    active = [a for a in appts if getattr(a, "status", "active") == "active"]
+    active.sort(key=lambda a: a.appointment_datetime or a.confirmed_at)
+    return active
+
+
+def get_latest_appointment_for_patient(from_number: str) -> Optional[AppointmentRecord]:
+    """Return the furthest-future active appointment, or None if none exist."""
+    active = get_active_appointments_for_patient(from_number)
+    return active[-1] if active else None
 
 
 def cancel_appointment(appointment_id: str) -> bool:
+    """Soft-delete: mark the appointment as cancelled (preserves history in Redis)."""
     appt = get_appointment(appointment_id)
     if appt:
-        _rdel(_key(f"appt:{appointment_id}"))
-        _srem(_key(f"appts_by_phone:{appt.from_number}"), appointment_id)
-        _appointments.pop(appointment_id, None)
+        appt.status = "cancelled"
+        save_appointment(appt)
         return True
     if appointment_id in _appointments:
-        del _appointments[appointment_id]
+        _appointments[appointment_id].status = "cancelled"
         return True
     return False
 

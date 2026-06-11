@@ -11,6 +11,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.patient import Patient
+    from app.models.appointment import Appointment
 
 
 class Clinic(Base):
@@ -34,3 +35,4 @@ class Clinic(Base):
         "ModelConfig", back_populates="clinic", uselist=False
     )
     patients: Mapped[List["Patient"]] = relationship(back_populates="clinic")
+    appointments: Mapped[List["Appointment"]] = relationship("Appointment", back_populates="clinic")

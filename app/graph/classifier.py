@@ -26,7 +26,7 @@ def _get_gemini_llm():
             google_api_key=key,
             model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             temperature=0.1,
-            max_output_tokens=512,
+            max_output_tokens=1024,
             max_retries=1,
         )
     except ImportError:
@@ -198,7 +198,7 @@ def classify_node(state: ClassifierState) -> dict:
     enc_key = state.get("llm_enc_key")
 
     try:
-        llm = get_llm_for_vendor(vendor, model, enc_key, temperature=0.1, max_tokens=512)
+        llm = get_llm_for_vendor(vendor, model, enc_key, temperature=0.1, max_tokens=1024)
         intents = _call_llm(llm, messages_history, context_message=context_message)
         result = intents[0]
 

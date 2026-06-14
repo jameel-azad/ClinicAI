@@ -9,7 +9,6 @@ def _strip_dr(name: str) -> str:
 
 
 from app.services.appointment_approval import handle_appointment_button_reply, handle_doctor_approval_reply
-from app.services.doctor_setup import handle_doctor_setup_message
 from app.services.soap_approval import handle_soap_approval_reply, handle_soap_button_reply
 from app.services.store import (
     all_appointments,
@@ -48,11 +47,6 @@ def handle_doctor_message(
         soap_reply = handle_soap_approval_reply(message, doctor_number)
         if soap_reply:
             return soap_reply
-
-    if doctor_number:
-        setup_reply = handle_doctor_setup_message(message, doctor_number, doctor_name)
-        if setup_reply:
-            return setup_reply
 
     if doctor_number:
         lab_reply = _handle_lab_review_ack(message, doctor_number, name, clinic_twilio_number)
@@ -171,8 +165,6 @@ def _help_message(name: str) -> str:
     return (
         f"Hello {name}. This is your {clinic} doctor interface.\n\n"
         "Commands:\n"
-        "- *setup doctor* — onboarding\n"
-        "- *profile* — view your profile\n"
         "- *today* — today's appointments\n"
         "- *pending / inbox* — pending approvals\n"
         "- *APPROVE / REJECT {id}* — SOAP note approval\n"

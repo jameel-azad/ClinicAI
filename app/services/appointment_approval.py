@@ -448,11 +448,14 @@ def suggest_alternative_slots(
     time_str: str | None,
 ) -> list[dict]:
     if calendar_enabled():
-        profile = find_doctor_profile_by_name(doctor_name) or {}
-        cal_id = profile.get("google_calendar_id") or None
-        suggestions = suggest_google_slots(date_str, time_str, calendar_id=cal_id)
-        save_slot_suggestions(patient_number, suggestions)
-        return suggestions
+        try:
+            profile = find_doctor_profile_by_name(doctor_name) or {}
+            cal_id = profile.get("google_calendar_id") or None
+            suggestions = suggest_google_slots(date_str, time_str, calendar_id=cal_id)
+            save_slot_suggestions(patient_number, suggestions)
+            return suggestions
+        except Exception as exc:
+            print(f"[WARN] suggest_google_slots failed, falling back to local: {exc}")
 
     suggestions = _suggest_local_slots(doctor_name, date_str, time_str)
     save_slot_suggestions(patient_number, suggestions)

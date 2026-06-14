@@ -12,7 +12,6 @@ Key schema (all prefixed  clinicai:):
   approval:{id}                  → dict JSON                     no TTL
   approvals_waiting:{doctor}     → Redis SET of approval_ids     no TTL
   doctor_profile:{phone}         → dict JSON                     no TTL
-  doctor_setup:{phone}           → dict JSON                     TTL 3600s
   greeted:{phone}                → "1"                           TTL 2592000s
   slot_suggestions:{phone}       → JSON list                     TTL 86400s
   soap:{id}                      → dict JSON                     TTL 604800s
@@ -36,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 _PREFIX = "clinicai:"
 _TTL_SESSION = 86_400        # 24 h
-_TTL_SETUP = 3_600           # 1 h
 _TTL_GREETED = 2_592_000     # 30 days
 _TTL_SLOTS = 86_400          # 24 h
 _TTL_PENDING = 604_800       # 7 days
@@ -138,7 +136,6 @@ _appointments: dict[str, AppointmentRecord] = {}
 _pending_approvals: dict[str, dict] = {}
 _greeted_numbers: set[str] = set()
 _doctor_profiles: dict[str, dict] = {}
-_doctor_setup_sessions: dict[str, dict] = {}
 _slot_suggestions: dict[str, list[dict]] = {}
 _pending_soaps: dict[str, dict] = {}
 _pending_lab_reviews: dict[str, dict] = {}
@@ -530,23 +527,6 @@ def all_doctor_profiles() -> dict:
             pass
     return _doctor_profiles.copy()
 
-
-def save_doctor_setup_session(doctor_number: str, session: dict) -> None:
-    session["updated_at"] = datetime.now().isoformat()
-    _rset(_key(f"doctor_setup:{doctor_number}"), session, _TTL_SETUP)
-    _doctor_setup_sessions[doctor_number] = session
-
-
-def get_doctor_setup_session(doctor_number: str) -> Optional[dict]:
-    data = _rget(_key(f"doctor_setup:{doctor_number}"))
-    if data:
-        return data
-    return _doctor_setup_sessions.get(doctor_number)
-
-
-def clear_doctor_setup_session(doctor_number: str) -> None:
-    _rdel(_key(f"doctor_setup:{doctor_number}"))
-    _doctor_setup_sessions.pop(doctor_number, None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

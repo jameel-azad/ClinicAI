@@ -238,7 +238,8 @@ def _is_affirmative(message: str) -> bool:
         message,
         words={"yes", "yeah", "yep", "y", "ok", "okay", "haan", "ha",
                "confirm", "confirmed", "bilkul", "sure", "done"},
-        phrases={"theek hai"},
+        phrases={"theek hai", "हाँ", "हां", "ठीक है", "बिल्कुल", "ओके",
+                 "जी हाँ", "हो जाएगा", "कर दो"},
     )
 
 
@@ -246,7 +247,8 @@ def _is_negative(message: str) -> bool:
     return _word_match(
         message,
         words={"no", "nope", "nahi", "nahin", "cancel", "stop", "nhi"},
-        phrases={"band karo", "mat karo"},
+        phrases={"band karo", "mat karo", "नहीं", "नही", "मत करो",
+                 "बंद करो", "रद्द करो"},
     )
 
 
@@ -291,6 +293,48 @@ def _is_past_date(date_str: str | None) -> tuple[bool, str | None]:
         return resolved < today, display
     except Exception:
         return False, None
+
+
+def _validate_time_in_hours(time_str: str | None, doctor_name: str | None) -> str | None:
+    """Return a user-facing error if time_str is outside doctor working hours, else None."""
+    if not time_str:
+        return None
+    from app.services.google_calendar import is_vague_time
+    if is_vague_time(time_str):
+        return None
+    try:
+        from app.services.store import find_doctor_profile_by_name
+        profile = find_doctor_profile_by_name(doctor_name) or {}
+        hours_text = profile.get("working_hours") or ""
+        m_h = re.search(r"(\d{1,2})(?::\d{2})?\s*[-–]\s*(\d{1,2})(?::\d{2})?", hours_text)
+        start_h = int(m_h.group(1)) if m_h else int(os.getenv("CLINIC_OPEN_HOUR", "9"))
+        end_h = int(m_h.group(2)) if m_h else int(os.getenv("CLINIC_CLOSE_HOUR", "20"))
+
+        m_t = re.match(r"(\d{1,2})(?::\d{2})?\s*(am|pm)?", time_str.strip().lower())
+        if not m_t:
+            return None
+        hour = int(m_t.group(1))
+        meridiem = m_t.group(2)
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        elif not meridiem and hour <= 12:
+            return None  # ambiguous 12-hour without am/pm — skip validation
+
+        if hour < start_h or hour >= end_h:
+            def _fmt_h(h: int) -> str:
+                sfx = "AM" if h < 12 else "PM"
+                dh = h % 12 or 12
+                return f"{dh}:00 {sfx}"
+            return (
+                f"Sorry, the doctor is not available at *{time_str}*. "
+                f"Working hours are *{_fmt_h(start_h)}* to *{_fmt_h(end_h)}*.\n"
+                "Please choose a time during working hours. _(e.g. '10 AM', '3:30 PM')_"
+            )
+    except Exception:
+        pass
+    return None
 
 
 def _ask_for_missing(session: "BookingSession", missing: list) -> str:
@@ -415,6 +459,7 @@ def flow_node(state: BookingState) -> dict:
     entities = state.get("extracted_entities", {})
     bot_response = state.get("bot_response")
     incoming_message = state.get("incoming_message", "")
+    intent = state.get("intent", "general_query")
 
     # ── COLLECT_DOCTOR_PREFERENCE: patient is responding to the doctor list ──
     if booking_state == "COLLECT_DOCTOR_PREFERENCE":
@@ -452,6 +497,9 @@ def flow_node(state: BookingState) -> dict:
                         ),
                         "pipeline_log": [f"flow_node: past date '{_display}' rejected in COLLECT_DOCTOR_PREFERENCE"],
                     }
+                if not _display:
+                    # Invalid date (e.g. "31 February") — clear silently; re-asked below
+                    session.requested_date = None
 
             # Check what's still missing after the doctor is chosen
             remaining = []
@@ -645,8 +693,7 @@ def flow_node(state: BookingState) -> dict:
                 "pipeline_log": [f"flow_node: doctor '{_raw_doctor}' not found in clinic → showing list"],
             }
 
-    # Reject past dates — must happen after entity application so we validate
-    # the date from the current message, not an old value sitting in the session.
+    # Reject past/invalid dates — validate the date from the current message.
     if session.requested_date and entities.get("requested_date"):
         _past, _display = _is_past_date(session.requested_date)
         if _past:
@@ -661,6 +708,20 @@ def flow_node(state: BookingState) -> dict:
                     "_(e.g. 'tomorrow', '15 June', 'next Monday')_"
                 ),
                 "pipeline_log": [f"flow_node: past date '{_display}' rejected"],
+            }
+        if not _display:
+            # Date string present but unresolvable (e.g. "31 February") — invalid
+            raw = entities.get("requested_date", session.requested_date)
+            session.requested_date = None
+            session.state = "COLLECTING_INFO"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": (
+                    f"Sorry, *{raw}* doesn't look like a valid date. "
+                    "Please share a real date like '15 June' or 'next Monday'."
+                ),
+                "pipeline_log": [f"flow_node: invalid date '{raw}' rejected"],
             }
 
     # If COLLECTING_INFO but still no data at all, treat as a fresh GREETING so
@@ -730,6 +791,16 @@ def flow_node(state: BookingState) -> dict:
         }
     else:
         _finalize_slot(session)
+        _wh_msg = _validate_time_in_hours(session.requested_time, session.doctor_name)
+        if _wh_msg:
+            session.requested_time = None
+            session.state = "COLLECTING_INFO"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": _wh_msg,
+                "pipeline_log": ["flow_node: time outside working hours, re-asking"],
+            }
         session.state = "CONFIRM_SLOT"
         reply = MSG_CONFIRM.format(
             doctor=session.doctor_name,
@@ -849,6 +920,37 @@ def reschedule_node(state: BookingState) -> dict:
         )
         new_date = entities.get("requested_date") or session.new_requested_date
         new_time = entities.get("requested_time") or session.new_requested_time
+
+        # Validate newly extracted date (past / invalid)
+        if entities.get("requested_date") and new_date:
+            _past, _display = _is_past_date(new_date)
+            if _past:
+                new_date = None
+                session.new_requested_date = None
+                session.new_requested_time = new_time
+                return {
+                    "session": session.model_dump(),
+                    "current_booking_state": "RESCHEDULE_COLLECTING",
+                    "reply_message": (
+                        f"Sorry, *{_display}* has already passed. "
+                        "Please share a future date.\n_(e.g. 'next Monday', '20 June')_"
+                    ),
+                    "pipeline_log": [f"reschedule_node: past date '{_display}' rejected"],
+                }
+            if not _display:
+                new_date = None
+                session.new_requested_date = None
+                session.new_requested_time = new_time
+                return {
+                    "session": session.model_dump(),
+                    "current_booking_state": "RESCHEDULE_COLLECTING",
+                    "reply_message": (
+                        "That doesn't look like a valid date. "
+                        "Please share a date like '15 June' or 'next Monday'."
+                    ),
+                    "pipeline_log": ["reschedule_node: invalid date rejected"],
+                }
+
         session.new_requested_date = new_date
         session.new_requested_time = new_time
 
@@ -874,11 +976,26 @@ def reschedule_node(state: BookingState) -> dict:
                 "pipeline_log": ["reschedule_node: got date, need time"],
             }
 
+        # Both present — validate time against working hours
+        _wh_msg = _validate_time_in_hours(new_time, session.doctor_name)
+        if _wh_msg:
+            session.new_requested_time = None
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": _wh_msg,
+                "pipeline_log": ["reschedule_node: new time outside working hours, re-asking"],
+            }
+
         session.state = "RESCHEDULE_CONFIRM"
         return {
             "session": session.model_dump(),
             "current_booking_state": "RESCHEDULE_CONFIRM",
-            "reply_message": MSG_RESCHEDULE_CONFIRM.format(new_date=new_date, new_time=new_time),
+            "reply_message": MSG_RESCHEDULE_CONFIRM.format(
+                    doctor=session.doctor_name or "the doctor",
+                    new_date=new_date,
+                    new_time=new_time,
+                ),
             "pipeline_log": ["reschedule_node: got both, asking confirmation"],
         }
 

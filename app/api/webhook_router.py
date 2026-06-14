@@ -287,6 +287,14 @@ async def twilio_webhook(
                     save_session(BookingSession(**sess_dict))
                 except Exception as sess_err:
                     print(f"[WARN] Could not persist session: {sess_err}")
+            elif not final_state.get("session"):
+                # Session was explicitly cleared (cancel/reject) — remove from Redis
+                # so a server restart cannot restore the stale BOOKED state.
+                from app.services.store import delete_session
+                try:
+                    delete_session(from_number, clinic_id=clinic_id)
+                except Exception:
+                    pass
 
             # Update patient name in DB once the booking flow captures it
             captured_name = (final_state.get("session") or {}).get("patient_name")

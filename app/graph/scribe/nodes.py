@@ -248,11 +248,12 @@ def soap_generator_node(state: ScribeState) -> dict:
         }
 
     last_error = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             if attempt > 0:
-                print(f"[soap_gen] Retry attempt {attempt + 1} after delay...")
-                time.sleep(3)
+                delay = 5 * attempt  # 5s, then 10s
+                print(f"[soap_gen] Retry attempt {attempt + 1} after {delay}s delay...")
+                time.sleep(delay)
 
             llm = _llm(state.get("llm_enc_key"))
             messages = [
@@ -386,7 +387,7 @@ def grounding_check_node(state: ScribeState) -> dict:
         return {"grounding_report": [], "ungrounded_flags": [], "errors": errors}
 
     try:
-        llm = _llm()
+        llm = _llm(state.get("llm_enc_key"))
         messages = [
             SystemMessage(content=GROUNDING_SYSTEM),
             HumanMessage(content=(
@@ -481,7 +482,7 @@ def followup_generator_node(state: ScribeState) -> dict:
         }
 
     try:
-        llm = _llm()
+        llm = _llm(state.get("llm_enc_key"))
         prompt = f"Assessment:\n{assessment}\n\nPlan:\n{plan}"
         messages = [
             SystemMessage(content=FOLLOWUP_SYSTEM),
@@ -584,7 +585,7 @@ def extract_entities_node(state: ScribeState) -> dict:
     context = "\n\n".join(context_parts)
 
     try:
-        llm = _llm()
+        llm = _llm(state.get("llm_enc_key"))
         messages = [
             SystemMessage(content=ENTITY_EXTRACT_SYSTEM),
             HumanMessage(content=f"--- BEGIN UNTRUSTED CLINICAL DATA ---\n{context}\n--- END UNTRUSTED CLINICAL DATA ---"),

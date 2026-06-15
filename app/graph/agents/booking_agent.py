@@ -184,7 +184,7 @@ def _extract_booking_entities(
     except Exception as e:
         print(f"[WARN] Entity extraction failed: {e}")
         return {"patient_name": None, "requested_date": None,
-                "requested_time": None, "doctor_name": None}
+                "requested_time": None, "doctor_name": None, "symptoms_mentioned": None}
 
 
 def _word_match(message: str, words: set, phrases: set | None = None) -> bool:
@@ -306,9 +306,29 @@ def _validate_time_in_hours(time_str: str | None, doctor_name: str | None) -> st
         from app.services.store import find_doctor_profile_by_name
         profile = find_doctor_profile_by_name(doctor_name) or {}
         hours_text = profile.get("working_hours") or ""
-        m_h = re.search(r"(\d{1,2})(?::\d{2})?\s*[-–]\s*(\d{1,2})(?::\d{2})?", hours_text)
-        start_h = int(m_h.group(1)) if m_h else int(os.getenv("CLINIC_OPEN_HOUR", "9"))
-        end_h = int(m_h.group(2)) if m_h else int(os.getenv("CLINIC_CLOSE_HOUR", "20"))
+
+        # Parse working hours handling both 12h ("9 AM - 6 PM") and 24h ("9-18") formats
+        m_h = re.search(
+            r"(\d{1,2})(?::\d{2})?\s*(am|pm)?\s*[-–]\s*(\d{1,2})(?::\d{2})?\s*(am|pm)?",
+            hours_text.lower(),
+        )
+        if m_h:
+            start_h = int(m_h.group(1))
+            start_mer = m_h.group(2)
+            end_h = int(m_h.group(3))
+            end_mer = m_h.group(4)
+            # Convert to 24-hour
+            if start_mer == "pm" and start_h != 12:
+                start_h += 12
+            elif start_mer == "am" and start_h == 12:
+                start_h = 0
+            if end_mer == "pm" and end_h != 12:
+                end_h += 12
+            elif end_mer == "am" and end_h == 12:
+                end_h = 0
+        else:
+            start_h = int(os.getenv("CLINIC_OPEN_HOUR", "9"))
+            end_h = int(os.getenv("CLINIC_CLOSE_HOUR", "20"))
 
         m_t = re.match(r"(\d{1,2})(?::\d{2})?\s*(am|pm)?", time_str.strip().lower())
         if not m_t:
@@ -477,6 +497,10 @@ def flow_node(state: BookingState) -> dict:
             doctors = match_by_symptoms(session.symptoms) if session.symptoms else all_doctors()
 
         resolved = resolve_selection(incoming_message, doctors)
+        # If the raw message didn't match (e.g. Hindi name like "हिमांशु"), try the
+        # LLM-extracted doctor_name which may already be transliterated to English.
+        if not resolved and entities.get("doctor_name"):
+            resolved = resolve_selection(entities["doctor_name"], doctors)
         if resolved:
             session.doctor_name = resolved
             session.doctor_shortlist = None
@@ -535,13 +559,15 @@ def flow_node(state: BookingState) -> dict:
                 "pipeline_log": [f"flow_node: doctor={resolved}, still need {remaining}"],
             }
 
-        # Could not resolve — show a clear "not found" message then re-list
+        # Could not resolve — re-list doctors with appropriate message.
+        # Use a generic "please select" message for non-ASCII (Hindi/Urdu) input
+        # to avoid showing garbled characters in the error message.
         _attempted = incoming_message.strip()
-        _not_found_msg = (
-            f"Sorry, *{_attempted}* is not registered at this clinic.\n\n"
-            if len(_attempted) <= 40
-            else "Sorry, that doctor is not registered at this clinic.\n\n"
-        )
+        _is_non_ascii = any(ord(c) > 127 for c in _attempted)
+        if _is_non_ascii or len(_attempted) > 40:
+            _not_found_msg = "Please select a doctor from the list below:\n\n"
+        else:
+            _not_found_msg = f"Sorry, *{_attempted}* is not registered at this clinic.\n\n"
         return {
             "session": session.model_dump(),
             "current_booking_state": "COLLECT_DOCTOR_PREFERENCE",
@@ -754,8 +780,11 @@ def flow_node(state: BookingState) -> dict:
                 "pipeline_log": ["flow_node: consultation_message from new patient — bridged to booking"],
             }
 
-        # When doctor_name is the only remaining unknown, show the doctor selection list
-        if missing == ["doctor_name"] and is_booking:
+        # When doctor_name is the only remaining unknown, show the doctor selection list.
+        # This fires when the intent is booking-related OR when we're already mid-booking
+        # (COLLECTING_INFO) — bare Hindi replies like "मंगलवार" have no booking keywords
+        # but are still part of an ongoing booking session, so we must not get stuck.
+        if missing == ["doctor_name"] and (is_booking or booking_state == "COLLECTING_INFO"):
             from app.services.doctor_directory import (
                 match_by_symptoms, all_doctors, format_for_whatsapp,
             )
@@ -920,6 +949,9 @@ def reschedule_node(state: BookingState) -> dict:
         )
         new_date = entities.get("requested_date") or session.new_requested_date
         new_time = entities.get("requested_time") or session.new_requested_time
+        # Capture symptoms if provided during reschedule (e.g. patient mentions new symptoms)
+        if entities.get("symptoms_mentioned"):
+            session.symptoms = entities["symptoms_mentioned"]
 
         # Validate newly extracted date (past / invalid)
         if entities.get("requested_date") and new_date:

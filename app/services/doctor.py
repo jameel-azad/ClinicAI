@@ -76,6 +76,15 @@ def handle_doctor_message(
     if text in {"pending", "inbox", "show inbox"}:
         return _format_pending_approvals(doctor_number)
 
+    # Natural language queries — keyword-based matching for common doctor questions
+    _has_today = re.search(r"\btoday\b|\baaj\b|\btoday'?s?\b", text)
+    _has_appt = re.search(r"\bappointment", text)
+    _has_pending = re.search(r"\bpending\b|\bwaiting\b|\binbox\b|\bapproval\b", text)
+    if _has_today and (_has_appt or _has_pending):
+        return _format_today_appointments()
+    if _has_pending and not _has_today:
+        return _format_pending_approvals(doctor_number)
+
     # If doctor has an active reply context, silently forward freetext to that patient
     if doctor_number:
         ctx_reply = _handle_context_reply(message, doctor_number, name, text, clinic_twilio_number)

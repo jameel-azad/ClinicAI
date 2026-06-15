@@ -138,6 +138,14 @@ async def update_appointment(
                 save_appointment(redis_appt)
         except Exception:
             pass
+        # Cancel scheduled reminder and no-show jobs when appointment is cancelled
+        if body.status == "cancelled":
+            try:
+                from app.services.scheduler import cancel_reminder, cancel_no_show_jobs
+                cancel_reminder(appointment_id)
+                cancel_no_show_jobs(appointment_id)
+            except Exception:
+                pass
 
     await db.commit()
     await db.refresh(appt)

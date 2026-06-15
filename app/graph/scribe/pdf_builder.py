@@ -708,8 +708,11 @@ def build_soap_pdf(
     # Patient name
     pt_name = patient_name or soap_note.get("patient_name", "")
 
-    # Visit date
-    visit_date = soap_note.get("date", "") or datetime.now().strftime("%d-%b-%Y")
+    # Visit date — always use the actual generation date (today) to avoid the LLM
+    # incorrectly extracting a historical date from the transcript (e.g. a prior visit
+    # mentioned in context), which caused prescriptions for later appointments to show
+    # the date of the first appointment.
+    visit_date = datetime.now().strftime("%d-%b-%Y")
 
     # SOAP sections
     subj = soap_note.get("subjective", {})

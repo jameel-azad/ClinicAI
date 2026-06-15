@@ -141,6 +141,11 @@ def format_for_whatsapp(doctors: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _ascii_only(text: str) -> str:
+    """Strip all non-ASCII characters, returning only ASCII letters/digits."""
+    return re.sub(r"[^\x00-\x7F]", "", text).strip().lower()
+
+
 def resolve_selection(reply: str, doctors: list[dict]) -> str | None:
     """
     Try to resolve a patient's reply to a doctor name from the given list.
@@ -148,7 +153,7 @@ def resolve_selection(reply: str, doctors: list[dict]) -> str | None:
     Tries in order:
     1. Digit (e.g. "1", "2")
     2. Number word (e.g. "one", "second")
-    3. Doctor name fuzzy match against the list
+    3. Doctor name fuzzy match against the list (ASCII + non-ASCII aware)
     4. Specialty keyword match against the list
     Returns None if nothing resolves.
     """
@@ -173,12 +178,19 @@ def resolve_selection(reply: str, doctors: list[dict]) -> str | None:
             if 0 <= idx < len(doctors):
                 return doctors[idx].get("name")
 
-    # 3. Doctor name match (from the displayed list only)
+    # 3. Doctor name match — handles both ASCII and non-ASCII (Hindi/Urdu) replies.
+    # For non-ASCII input (e.g. "हिमांशु"), the LLM classifier often returns an
+    # English transliteration in doctor_name entity (e.g. "Himanshu"), so we also
+    # try an ASCII-only comparison of the stripped input against doctor name parts.
+    ascii_reply = _ascii_only(text)  # e.g. "" for pure Devanagari, or "himanshu" if mixed
     for doc in doctors:
         name = (doc.get("name") or "").lower()
-        # Check if any significant part of the name appears in the reply
         name_parts = [p for p in name.split() if len(p) > 2 and p not in {"the", "dr.", "dr"}]
+        # Standard ASCII substring match
         if any(part in lower for part in name_parts):
+            return doc.get("name")
+        # Transliteration-aware: compare ASCII-stripped reply against name parts
+        if ascii_reply and any(part in ascii_reply or ascii_reply in part for part in name_parts):
             return doc.get("name")
 
     # 4. Specialty keyword match (returns first matching doctor in list)

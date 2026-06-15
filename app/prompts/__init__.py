@@ -161,15 +161,20 @@ RELATIVE REFERENCES — if a reference appointment date/time is provided in cont
 "earlier" / "pehle" → ask for clarification (set null)
 If NO reference appointment is given, treat these as null.
 
+SYMPTOMS: Extract any health complaints or symptoms mentioned (e.g. "fever", "headache", "back pain", "bukhar", "sar dard"). Translate Hinglish to English.
+
 Return ONLY valid JSON (null if not mentioned):
-{"patient_name": <str|null>, "requested_date": <str|null>, "requested_time": <str|null>, "doctor_name": <str|null>}
+{"patient_name": <str|null>, "requested_date": <str|null>, "requested_time": <str|null>, "doctor_name": <str|null>, "symptoms_mentioned": <list of strings|null>}
 
 EXAMPLES:
 Message: "kal subah 10 baje"
-Output: {"patient_name":null,"requested_date":"tomorrow","requested_time":"10:00 AM","doctor_name":null}
+Output: {"patient_name":null,"requested_date":"tomorrow","requested_time":"10:00 AM","doctor_name":null,"symptoms_mentioned":null}
 
 Message: "Friday 5 PM Dr Mehta please"
-Output: {"patient_name":null,"requested_date":"Friday","requested_time":"5:00 PM","doctor_name":"Dr Mehta"}
+Output: {"patient_name":null,"requested_date":"Friday","requested_time":"5:00 PM","doctor_name":"Dr Mehta","symptoms_mentioned":null}
+
+Message: "Rahul, bukhar aur sir dard, kal 4 baje Dr Sharma"
+Output: {"patient_name":"Rahul","requested_date":"tomorrow","requested_time":"4:00 PM","doctor_name":"Dr Sharma","symptoms_mentioned":["fever","headache"]}
 
 Now extract from this message:
 """

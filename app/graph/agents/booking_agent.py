@@ -533,6 +533,16 @@ def flow_node(state: BookingState) -> dict:
 
             if not remaining:
                 _finalize_slot(session)
+                _wh_msg = _validate_time_in_hours(session.requested_time, session.doctor_name)
+                if _wh_msg:
+                    session.requested_time = None
+                    session.state = "COLLECTING_INFO"
+                    return {
+                        "session": session.model_dump(),
+                        "current_booking_state": "COLLECTING_INFO",
+                        "reply_message": _wh_msg,
+                        "pipeline_log": ["flow_node: time outside working hours after doctor selection, re-asking"],
+                    }
                 session.state = "CONFIRM_SLOT"
                 return {
                     "session": session.model_dump(),

@@ -187,7 +187,7 @@ def get_llm_for_vendor(
         api_key = (decrypt_api_key(enc_key) if enc_key else None) or os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("No Groq API key available (clinic config or GROQ_API_KEY env var)")
-        return ChatGroq(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens)
+        return ChatGroq(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens, max_retries=2)
 
 
 def get_groq_client(enc_key: Optional[str] = None):

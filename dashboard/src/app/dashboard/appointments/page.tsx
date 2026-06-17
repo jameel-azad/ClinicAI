@@ -174,6 +174,7 @@ export default function AppointmentsPage() {
                 <TableHead>Doctor</TableHead>
                 <TableHead>Date</TableHead>
                 <TableHead>Time</TableHead>
+                <TableHead>Symptoms</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -182,7 +183,7 @@ export default function AppointmentsPage() {
               {isLoading &&
                 Array.from({ length: 5 }).map((_, i) => (
                   <TableRow key={i}>
-                    {Array.from({ length: 7 }).map((_, j) => (
+                    {Array.from({ length: 8 }).map((_, j) => (
                       <TableCell key={j}>
                         <Skeleton className="h-4 w-full" />
                       </TableCell>
@@ -192,7 +193,7 @@ export default function AppointmentsPage() {
 
               {!isLoading && appointments?.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                  <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                     No appointments found.
                   </TableCell>
                 </TableRow>
@@ -210,6 +211,11 @@ export default function AppointmentsPage() {
                     <TableCell>{appt.doctor_name}</TableCell>
                     <TableCell>{appt.date_str}</TableCell>
                     <TableCell>{appt.time_str}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {appt.symptoms && appt.symptoms.length > 0
+                        ? appt.symptoms.join(", ")
+                        : <span className="italic">Not provided</span>}
+                    </TableCell>
                     <TableCell>{statusBadge(appt.status)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">

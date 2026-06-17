@@ -95,6 +95,7 @@ async def save_consultation_record(
     chief_complaint: Optional[str],
     soap_result: dict,  # output from scribe_service / process_consultation_bundle
     doctor_name_hint: Optional[str] = None,
+    appointment_date: Optional[str] = None,
 ) -> Optional[str]:
     """
     Persist a MedicalRecord of type "consultation" after a SOAP note is generated.
@@ -140,12 +141,22 @@ async def save_consultation_record(
                 s = soap.get(key) or {}
                 return s.get("content") if isinstance(s, dict) else str(s) if s else None
 
+            _visit_date = datetime.utcnow()
+            if appointment_date:
+                try:
+                    from app.services.google_calendar import resolve_date
+                    _d = resolve_date(appointment_date)
+                    if _d:
+                        _visit_date = datetime(_d.year, _d.month, _d.day)
+                except Exception:
+                    pass
+
             record = MedicalRecord(
                 patient_id=patient_id,
                 clinic_id=clinic_id,
                 doctor_id=doctor_id,
                 doctor_name=resolved_doctor_name,
-                visit_date=datetime.utcnow(),
+                visit_date=_visit_date,
                 record_type="consultation",
                 chief_complaint=chief_complaint,
                 soap_subjective=_section("subjective"),

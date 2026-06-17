@@ -84,7 +84,9 @@ def _doctor_numbers_from_env() -> dict[str, str | None]:
 def _normalize_name(name: str | None) -> str:
     if not name:
         return ""
-    return re.sub(r"[^a-z0-9]", "", name.lower().replace("doctor", "dr"))
+    # Use \W (Unicode-aware) so Devanagari/Arabic/etc. letters are preserved,
+    # not stripped like they were with the ASCII-only [^a-z0-9] pattern.
+    return re.sub(r"\W", "", name.lower().replace("doctor", "dr"), flags=re.UNICODE)
 
 
 def identify_sender(raw_from: str) -> SenderIdentity:

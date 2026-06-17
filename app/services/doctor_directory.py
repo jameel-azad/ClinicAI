@@ -183,11 +183,24 @@ def resolve_selection(reply: str, doctors: list[dict]) -> str | None:
     # English transliteration in doctor_name entity (e.g. "Himanshu"), so we also
     # try an ASCII-only comparison of the stripped input against doctor name parts.
     ascii_reply = _ascii_only(text)  # e.g. "" for pure Devanagari, or "himanshu" if mixed
+    # Unicode-normalised reply: keep only alphanumeric chars (Unicode-aware)
+    import re as _re
+    unicode_reply = _re.sub(r"\W", "", text.lower(), flags=_re.UNICODE)
     for doc in doctors:
         name = (doc.get("name") or "").lower()
         name_parts = [p for p in name.split() if len(p) > 2 and p not in {"the", "dr.", "dr"}]
         # Standard ASCII substring match
         if any(part in lower for part in name_parts):
+            return doc.get("name")
+        # Unicode-aware: strip non-word chars from both sides and compare
+        unicode_name_parts = [
+            _re.sub(r"\W", "", p, flags=_re.UNICODE)
+            for p in name_parts
+        ]
+        if unicode_reply and any(
+            p in unicode_reply or unicode_reply in p
+            for p in unicode_name_parts if p
+        ):
             return doc.get("name")
         # Transliteration-aware: compare ASCII-stripped reply against name parts
         if ascii_reply and any(part in ascii_reply or ascii_reply in part for part in name_parts):

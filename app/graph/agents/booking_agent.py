@@ -699,7 +699,13 @@ def flow_node(state: BookingState) -> dict:
 
     # Apply entities first so the COLLECTING_INFO check below sees any data from
     # the current message (not just what was accumulated in previous turns).
-    if entities.get("patient_name"): session.patient_name = entities["patient_name"]
+    if entities.get("patient_name"):
+        _raw_name = entities["patient_name"]
+        # Strip characters that cannot appear in a person's name (e.g. "@", "#", "=").
+        # Keep Unicode letters (covers Hindi/Arabic names), digits, spaces, and the
+        # punctuation that legitimately appears in names: . - ' ,
+        _clean_name = re.sub(r"[^\w\s.\-',]", "", _raw_name, flags=re.UNICODE).strip()
+        session.patient_name = _clean_name or None
     if entities.get("requested_date"): session.requested_date = entities["requested_date"]
     if entities.get("requested_time"): session.requested_time = entities["requested_time"]
     if entities.get("symptoms_mentioned"): session.symptoms = entities["symptoms_mentioned"]

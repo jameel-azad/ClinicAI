@@ -100,10 +100,28 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
             return f"✅ Prescription note approved and sent to {patient_number}."
         return f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. Please forward manually."
 
+    # PUBLIC_BASE_URL not configured — send a plain-text prescription summary so
+    # the patient still receives their clinical information.
+    soap_note = soap.get("soap_note") or {}
+    def _sec(key: str) -> str:
+        s = soap_note.get(key) or {}
+        return (s.get("content") if isinstance(s, dict) else str(s) or "").strip()
+
+    summary_lines = [f"📋 *Consultation Note — {patient_name}*\n"]
+    if _sec("subjective"):
+        summary_lines.append(f"*Symptoms:* {_sec('subjective')}")
+    if _sec("assessment"):
+        summary_lines.append(f"*Assessment:* {_sec('assessment')}")
+    if _sec("plan"):
+        summary_lines.append(f"*Plan / Prescription:* {_sec('plan')}")
+    summary_lines.append("\n_For the full prescription PDF, please contact the clinic._")
+    summary_text = "\n".join(summary_lines)
+
+    send_whatsapp_message_sync(patient_number, summary_text, from_number=clinic_twilio_number)
     pdf_path = get_scribe_pdf_path(document_id) if document_id else None
     return (
-        f"✅ Approved. PUBLIC_BASE_URL is not configured so the PDF could not be sent automatically.\n"
-        f"Please forward manually to {patient_number}.\n"
+        f"✅ Approved. A text summary was sent to {patient_number}.\n"
+        f"Configure PUBLIC_BASE_URL to enable automatic PDF delivery.\n"
         f"PDF path: {pdf_path or 'unavailable'}"
     )
 
@@ -245,13 +263,30 @@ def _save_consultation_record(soap: dict, patient_number: str, patient_name: str
     """Fire-and-forget: persist consultation to DB so it appears in the dashboard."""
     try:
         import asyncio
-        from app.services.store import get_session
+        from app.services.store import get_session, get_appointments_by_number
         from app.services.patient_service import save_consultation_record
 
         booking = get_session(patient_number)
         clinic_id = booking.clinic_id if booking else None
         if not clinic_id:
             return
+
+        # Resolve the appointment date from the most recent non-cancelled appointment
+        # for this patient with this doctor, so the medical record shows the correct visit date.
+        appointment_date: str | None = None
+        try:
+            doctor_name = (soap.get("doctor_name") or "").lower().strip()
+            appts = get_appointments_by_number(patient_number)
+            relevant = [
+                a for a in appts
+                if getattr(a, "status", "active") != "cancelled"
+                and (not doctor_name or (a.doctor_name or "").lower().strip() == doctor_name)
+            ]
+            if relevant:
+                relevant.sort(key=lambda a: a.confirmed_at or "", reverse=True)
+                appointment_date = relevant[0].date_str
+        except Exception:
+            pass
 
         soap_result = {
             "soap_note": soap.get("soap_note") or {},
@@ -268,6 +303,7 @@ def _save_consultation_record(soap: dict, patient_number: str, patient_name: str
             chief_complaint=None,
             soap_result=soap_result,
             doctor_name_hint=soap.get("doctor_name"),
+            appointment_date=appointment_date,
         ))
     except Exception as exc:
         print(f"[SOAP] Could not save consultation record: {exc}")

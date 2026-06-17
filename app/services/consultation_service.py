@@ -151,6 +151,9 @@ async def finalize_and_send(patient_number: str) -> str:
         if not _clinic_id and booking_session:
             _clinic_id = getattr(booking_session, "clinic_id", None)
         if _clinic_id:
+            from app.services.store import get_latest_appointment_for_patient
+            _appt = get_latest_appointment_for_patient(patient_number)
+            _appt_date = _appt.date_str if _appt else None
             await save_consultation_record(
                 clinic_id=_clinic_id,
                 patient_phone=patient_number,
@@ -162,6 +165,7 @@ async def finalize_and_send(patient_number: str) -> str:
                     else getattr(booking_session, "symptoms", None) if booking_session else None
                 ),
                 soap_result=result,
+                appointment_date=_appt_date,
             )
     except Exception as _exc:
         print(f"[ConsultationService] Non-fatal: failed to save patient record: {_exc}")

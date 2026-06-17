@@ -243,7 +243,7 @@ def fallback_node(state: ClassifierState) -> dict:
             "intent": "general_query",
             "confidence": 0.0,
             "entities": EMPTY_ENTITIES.copy(),
-            "bot_response": "I'm having trouble connecting to my servers right now. Please try again later.",
+            "bot_response": "We're experiencing high traffic right now. Please send your message again in a moment — we'll be right with you! 🙏",
         }
         return {
             **result,

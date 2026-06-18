@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from typing import Optional
@@ -9,11 +10,70 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate, Frame, PageTemplate,
     Paragraph, Spacer, Table, TableStyle,
     HRFlowable, KeepTogether, PageBreak,
 )
+
+
+# ---------------------------------------------------------------------------
+# Unicode / Devanagari font registration
+# ReportLab's built-in Helvetica lacks Devanagari glyphs; register a TTF that
+# covers the full Unicode range so Hindi text renders correctly in the PDF.
+# ---------------------------------------------------------------------------
+
+def _register_unicode_fonts() -> tuple[str, str]:
+    """Register a Unicode-capable font and return (regular_name, bold_name).
+
+    Search order:
+      1. Windows  — Nirmala UI (ships with Windows 8+, covers Devanagari)
+      2. Linux    — Noto Sans (install: apt-get install fonts-noto-core)
+      3. Fallback — built-in Helvetica (Hindi shows as boxes, but no crash)
+    """
+    _WIN_TTC = "C:/Windows/Fonts/Nirmala.ttc"
+    _LINUX_REGULAR = [
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    _LINUX_BOLD = [
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+    ]
+
+    if os.path.exists(_WIN_TTC):
+        try:
+            pdfmetrics.registerFont(TTFont("UnicodeSans",      _WIN_TTC, subfontIndex=0))
+            pdfmetrics.registerFont(TTFont("UnicodeSans-Bold", _WIN_TTC, subfontIndex=1))
+            return "UnicodeSans", "UnicodeSans-Bold"
+        except Exception:
+            pass
+
+    for path in _LINUX_REGULAR:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont("UnicodeSans", path))
+                for bold_path in _LINUX_BOLD:
+                    if os.path.exists(bold_path):
+                        try:
+                            pdfmetrics.registerFont(TTFont("UnicodeSans-Bold", bold_path))
+                            return "UnicodeSans", "UnicodeSans-Bold"
+                        except Exception:
+                            pass
+                return "UnicodeSans", "UnicodeSans"
+            except Exception:
+                pass
+
+    return "Helvetica", "Helvetica-Bold"
+
+
+_BODY_FONT, _BODY_FONT_BOLD = _register_unicode_fonts()
 
 # ---------------------------------------------------------------------------
 # Colour palette
@@ -73,22 +133,22 @@ def _styles() -> dict:
                           textColor=GREY, alignment=TA_CENTER)
     s["pt_label"]    = ps("pt_label", fontSize=7.5, fontName="Helvetica-Bold",
                           textColor=GREY)
-    s["pt_value"]    = ps("pt_value", fontSize=9, fontName="Helvetica",
+    s["pt_value"]    = ps("pt_value", fontSize=9, fontName=_BODY_FONT,
                           textColor=TEXT_DARK)
-    s["pt_name"]     = ps("pt_name", fontSize=11, fontName="Helvetica-Bold",
+    s["pt_name"]     = ps("pt_name", fontSize=11, fontName=_BODY_FONT_BOLD,
                           textColor=TEXT_DARK)
     s["sec_head"]    = ps("sec_head", fontSize=8.5, fontName="Helvetica-Bold",
                           textColor=DARK_BLUE, spaceBefore=4, spaceAfter=1)
-    s["sec_body"]    = ps("sec_body", fontSize=9, fontName="Helvetica",
+    s["sec_body"]    = ps("sec_body", fontSize=9, fontName=_BODY_FONT,
                           textColor=TEXT_DARK, leading=14, spaceAfter=2,
                           alignment=TA_JUSTIFY)
-    s["bullet"]      = ps("bullet", fontSize=9, fontName="Helvetica",
+    s["bullet"]      = ps("bullet", fontSize=9, fontName=_BODY_FONT,
                           textColor=TEXT_DARK, leading=13, leftIndent=8)
-    s["med_name"]    = ps("med_name", fontSize=9, fontName="Helvetica-Bold",
+    s["med_name"]    = ps("med_name", fontSize=9, fontName=_BODY_FONT_BOLD,
                           textColor=TEXT_DARK, leading=12)
-    s["med_detail"]  = ps("med_detail", fontSize=7.5, fontName="Helvetica",
+    s["med_detail"]  = ps("med_detail", fontSize=7.5, fontName=_BODY_FONT,
                           textColor=GREY, leading=11)
-    s["med_note"]    = ps("med_note", fontSize=7.5, fontName="Helvetica-Oblique",
+    s["med_note"]    = ps("med_note", fontSize=7.5, fontName=_BODY_FONT,
                           textColor=GREY, alignment=TA_LEFT)
     s["col_head"]    = ps("col_head", fontSize=8, fontName="Helvetica-Bold",
                           textColor=WHITE, alignment=TA_CENTER)
@@ -102,11 +162,11 @@ def _styles() -> dict:
                           textColor=GREY, alignment=TA_CENTER)
     s["audit_head"]  = ps("audit_head", fontSize=9, fontName="Helvetica-Bold",
                           textColor=GREY, spaceBefore=4, spaceAfter=2)
-    s["audit_body"]  = ps("audit_body", fontSize=7.5, fontName="Helvetica",
+    s["audit_body"]  = ps("audit_body", fontSize=7.5, fontName=_BODY_FONT,
                           textColor=GREY, leading=11)
-    s["warn"]        = ps("warn", fontSize=8, fontName="Helvetica",
+    s["warn"]        = ps("warn", fontSize=8, fontName=_BODY_FONT,
                           textColor=RED, leading=12)
-    s["missing"]     = ps("missing", fontSize=8, fontName="Helvetica-Oblique",
+    s["missing"]     = ps("missing", fontSize=8, fontName=_BODY_FONT,
                           textColor=AMBER, leading=12)
 
     return s
@@ -266,7 +326,7 @@ def _patient_bar(
         if not value:
             return Paragraph("", styles["pt_value"])
         return Paragraph(
-            f'<font name="Helvetica-Bold" color="{GREY.hexval()}">'
+            f'<font name="{_BODY_FONT_BOLD}" color="{GREY.hexval()}">'
             f'{label}:</font> {value}',
             styles["pt_value"],
         )
@@ -333,7 +393,7 @@ def _patient_bar(
         result += [
             Spacer(1, 1.5 * mm),
             Paragraph(
-                f'<font name="Helvetica-Bold">Allergy:</font> {allergy}',
+                f'<font name="{_BODY_FONT_BOLD}">Allergy:</font> {allergy}',
                 styles["sec_body"],
             ),
         ]
@@ -377,7 +437,7 @@ def _diagnosis_block(
         row = Table(
             [[Paragraph(f"{i}.  {dx}", styles["sec_body"]),
               Paragraph("Type: &nbsp; Provisional",
-                        ParagraphStyle("dx_type", fontSize=8, fontName="Helvetica",
+                        ParagraphStyle("dx_type", fontSize=8, fontName=_BODY_FONT,
                                        textColor=GREY, alignment=TA_RIGHT))]],
             colWidths=None,
         )
@@ -630,7 +690,7 @@ def _audit_appendix(
             ])
         gr_tbl = Table(gr_data, colWidths=[full_w * 0.50, full_w * 0.38, full_w * 0.12])
         gr_tbl.setStyle(TableStyle([
-            ("FONTNAME",     (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTNAME",     (0, 0), (-1, 0),  _BODY_FONT_BOLD),
             ("FONTSIZE",     (0, 0), (-1, -1), 7),
             ("BACKGROUND",   (0, 0), (-1, 0),  GREY),
             ("TEXTCOLOR",    (0, 0), (-1, 0),  WHITE),

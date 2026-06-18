@@ -368,9 +368,12 @@ def _ask_for_missing(session: "BookingSession", missing: list) -> str:
         return "What date and time would you prefer?\n_(e.g. '15 June at 5 PM')_"
     if missing == ["patient_name"]:
         return "Could you share the patient's name? 👤"
+    if missing == ["symptoms"]:
+        return "Could you share the patient's symptoms? 📋\n_(e.g. fever, headache, knee pain)_"
     # Multiple missing — list them
     parts = []
     if "patient_name" in missing: parts.append("👤 *Patient name*")
+    if "symptoms" in missing: parts.append("📋 *Symptoms* (e.g. fever, headache)")
     if "requested_date" in missing: parts.append("📅 *Preferred date* (e.g. 15 June)")
     if "requested_time" in missing: parts.append("🕐 *Preferred time* (e.g. 5 PM)")
     if "doctor_name" in missing: parts.append("👨‍⚕️ *Doctor's name*")
@@ -528,6 +531,7 @@ def flow_node(state: BookingState) -> dict:
             # Check what's still missing after the doctor is chosen
             remaining = []
             if not session.patient_name: remaining.append("patient_name")
+            if not session.symptoms: remaining.append("symptoms")
             if not session.requested_date: remaining.append("requested_date")
             if not session.requested_time: remaining.append("requested_time")
 
@@ -555,11 +559,12 @@ def flow_node(state: BookingState) -> dict:
                     "pipeline_log": [f"flow_node: doctor={resolved}, all info present → CONFIRM_SLOT"],
                 }
 
-            # Still need name/date/time — ask for the remaining fields
+            # Still need name/symptoms/date/time — ask for the remaining fields
             session.state = "COLLECTING_INFO"
             parts = [f"*{resolved}* selected!"]
             parts.append("\nI still need a couple of details:\n")
             if "patient_name" in remaining: parts.append("👤 *Patient name*")
+            if "symptoms" in remaining: parts.append("📋 *Symptoms* (e.g. fever, headache)")
             if "requested_date" in remaining: parts.append("📅 *Preferred date* (e.g. 28th May)")
             if "requested_time" in remaining: parts.append("🕐 *Preferred time* (e.g. 5 PM)")
             return {
@@ -643,11 +648,19 @@ def flow_node(state: BookingState) -> dict:
                 "pipeline_log": ["flow_node: doctor approval already completed"],
             }
         if status == "rejected":
+            session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+            session.state = "RESCHEDULE_COLLECTING"
+            session.new_requested_date = None
+            session.new_requested_time = None
             return {
-                "session": None,
-                "current_booking_state": "GREETING",
-                "reply_message": "The doctor could not approve that slot. Please send another date and time.",
-                "pipeline_log": ["flow_node: doctor rejected pending appointment"],
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": (
+                    "The doctor could not approve that slot. "
+                    "Please share a new preferred date and time.\n"
+                    "_(e.g. '26th June at 4 PM')_"
+                ),
+                "pipeline_log": ["flow_node: doctor rejected, session preserved, collecting new date/time"],
             }
         if status == "cancelled":
             return {
@@ -776,6 +789,7 @@ def flow_node(state: BookingState) -> dict:
 
     missing = []
     if not session.patient_name: missing.append("patient_name")
+    if not session.symptoms: missing.append("symptoms")
     if not session.requested_date: missing.append("requested_date")
     if not session.requested_time: missing.append("requested_time")
     if not session.doctor_name: missing.append("doctor_name")
@@ -1394,6 +1408,9 @@ def route_booking(
         return "flow_node"
 
     if booking_state == "GREETING":
+        return "flow_node"
+
+    if booking_state == "BOOKED":
         return "flow_node"
 
     return "off_topic_node"

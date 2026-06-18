@@ -30,8 +30,10 @@ def handle_soap_button_reply(button_payload: str, doctor_number: str) -> str | N
                     override = ctx["patient_number"]
             except Exception:
                 pass
-        return _approve(soap_id, override)
-    return _reject(soap_id)
+        result = _approve(soap_id, override)
+        return result or f"No pending prescription found for *{soap_id}*. It may have already been processed."
+    result = _reject(soap_id)
+    return result or f"No pending prescription found for *{soap_id}*. It may have already been processed."
 
 
 def handle_soap_approval_reply(message: str, doctor_number: str) -> str | None:
@@ -49,13 +51,21 @@ def handle_soap_approval_reply(message: str, doctor_number: str) -> str | None:
     )
 
     if approve_match:
-        return _approve(approve_match.group(1), approve_match.group(2))
+        soap_id = approve_match.group(1)
+        result = _approve(soap_id, approve_match.group(2))
+        # Always return a string when the command matched — never fall through to
+        # the appointment-approval handler which would show a misleading error.
+        return result or f"No pending prescription found for *{soap_id}*. It may have already been approved or rejected."
 
     if reject_match:
-        return _reject(reject_match.group(1))
+        soap_id = reject_match.group(1)
+        result = _reject(soap_id)
+        return result or f"No pending prescription found for *{soap_id}*. It may have already been processed."
 
     if regen_match:
-        return _regen(regen_match.group(1).upper(), (regen_match.group(2) or "").strip())
+        soap_id = regen_match.group(1).upper()
+        result = _regen(soap_id, (regen_match.group(2) or "").strip())
+        return result or f"No pending prescription found for *{soap_id}*. It may have already been processed."
 
     return None
 
@@ -185,6 +195,9 @@ def _regen(soap_id: str, feedback: str) -> str | None:
         state = {**state, **fhir_coding_node(state)}
         state = {**state, **grounding_check_node(state)}
         state = {**state, **followup_generator_node(state)}
+        # Restore clean transcript so the PDF audit section shows the original voice note,
+        # not the [DOCTOR CORRECTION: ...] prefix that was only needed for SOAP generation.
+        state = {**state, "transcript": transcript}
         state = {**state, **pdf_output_node(state)}
 
         new_pdf_path = state.get("pdf_path", "")

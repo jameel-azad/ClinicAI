@@ -159,6 +159,7 @@ RULES:
 5. Abbreviations: OD=once daily, BD=twice daily, TDS=three times daily, SOS=as needed, HTN=hypertension, DM=diabetes mellitus, IHD=ischaemic heart disease.
 6. Diagnosis abbreviations: HTN=hypertension, DM=diabetes mellitus, IHD=ischaemic heart disease, CKD=chronic kidney disease, COPD=chronic obstructive pulmonary disease, URTI=upper respiratory tract infection, UTI=urinary tract infection.
 7. follow_up_days: Convert to integer days. English: '2 weeks' → 14, '1 month' → 30. Hinglish: 'do hafte baad' → 14, 'ek mahina' → 30, 'teen din' → 3, 'kal aana' → 1. Not mentioned → null.
+8. DOCTOR CORRECTION format: If the input starts with "[DOCTOR CORRECTION: <feedback>]" followed by "--- ORIGINAL TRANSCRIPT ---", treat the correction as the doctor's explicit instruction to fix or supplement the note. Apply the correction to the relevant SOAP section(s). The original transcript follows the separator and provides the base clinical context. Both the correction and the transcript are authoritative — give the correction higher priority for any conflicting detail.
 
 Return ONLY valid JSON (no markdown, no preamble) matching this schema:
 {

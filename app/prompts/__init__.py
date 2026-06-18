@@ -58,8 +58,9 @@ The sender's name is NOT the patient name. Do NOT construct names like "Imran's 
 Only extract patient_name when the ACTUAL name is stated (e.g. "appointment for Riya", "meri beti Sana ko dikhana hai").
 
 BILINGUAL FORMAT: For Hindi/Hinglish symptoms/meds, use "English (original)":
-"bukhar"→"fever (bukhar)", "sar dard"→"headache (sar dard)"
+"bukhar"→"fever (bukhar)", "sar dard"→"headache (sar dard)", "ghutne ka dard"→"knee pain (घुटने का दर्द)"
 English → store as-is. Untranslatable → "unknown symptom (original)".
+CRITICAL: The English part (before the parenthesis) MUST use ONLY standard Latin characters (a-z, A-Z). NEVER start or include Devanagari/Hindi script in the English translation — only inside the parentheses is Devanagari allowed.
 
 HINGLISH: You speak Hinglish natively. Understand Hindi time words (kal, parso, aaj, subah, dopahar, shaam, raat, etc.) and all spelling variants without hesitation. Examples: "kal subah" = tomorrow morning, "aaj shaam" = today evening, "parso 3 baje" = day after tomorrow at 3.
 
@@ -161,7 +162,11 @@ RELATIVE REFERENCES — if a reference appointment date/time is provided in cont
 "earlier" / "pehle" → ask for clarification (set null)
 If NO reference appointment is given, treat these as null.
 
-SYMPTOMS: Extract any health complaints or symptoms mentioned (e.g. "fever", "headache", "back pain", "bukhar", "sar dard"). Translate Hinglish to English.
+SYMPTOMS: Extract any health complaints or symptoms mentioned. Translate Hindi/Hinglish to English.
+CRITICAL SYMPTOM RULES:
+1. The English symptom text MUST use ONLY standard Latin characters (a-z, A-Z, spaces, hyphens). NEVER use Devanagari/Hindi script characters in the English part.
+2. For Hindi/Devanagari input: output format is "English term (original Hindi)" — e.g. "घुटने का दर्द" → "knee pain (घुटने का दर्द)", "bukhar" → "fever", "sar dard" → "headache".
+3. Never mix scripts: "कnee" or "Knee" with Devanagari letters is WRONG. "knee pain" is correct.
 
 Return ONLY valid JSON (null if not mentioned):
 {"patient_name": <str|null>, "requested_date": <str|null>, "requested_time": <str|null>, "doctor_name": <str|null>, "symptoms_mentioned": <list of strings|null>}
@@ -175,6 +180,9 @@ Output: {"patient_name":null,"requested_date":"Friday","requested_time":"5:00 PM
 
 Message: "Rahul, bukhar aur sir dard, kal 4 baje Dr Sharma"
 Output: {"patient_name":"Rahul","requested_date":"tomorrow","requested_time":"4:00 PM","doctor_name":"Dr Sharma","symptoms_mentioned":["fever","headache"]}
+
+Message: "घुटने का दर्द aur kamar mein dard hai"
+Output: {"patient_name":null,"requested_date":null,"requested_time":null,"doctor_name":null,"symptoms_mentioned":["knee pain (घुटने का दर्द)","lower back pain"]}
 
 Now extract from this message:
 """

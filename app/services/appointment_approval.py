@@ -624,8 +624,31 @@ def _same_time(left: str | None, right: str | None) -> bool:
     return nl is not None and nl == nr
 
 
+_DEVANAGARI = re.compile("[ऀ-ॿ]+")
+
+
+def _sanitize_symptom(symptom: str) -> str:
+    """Strip stray Devanagari characters from the English (Latin) part of a symptom.
+
+    Handles garbled LLM output like 'कnee pain (घुटने का दर्द)' → 'knee pain (घुटने का दर्द)'.
+    Devanagari inside parentheses (the Hindi original) is intentional and kept intact.
+    """
+    paren_idx = symptom.find("(")
+    if paren_idx >= 0:
+        english_part = _DEVANAGARI.sub("", symptom[:paren_idx]).strip()
+        hindi_part = symptom[paren_idx:]
+        if english_part:
+            return f"{english_part} {hindi_part}".strip()
+        # English part was entirely Devanagari — extract the Hindi term as plain text
+        inner = hindi_part.strip("() ")
+        return _DEVANAGARI.sub("", inner).strip() or inner
+    return _DEVANAGARI.sub("", symptom).strip()
+
+
 def _format_symptoms(symptoms: list[str] | None) -> str:
-    return ", ".join(symptoms) if symptoms else "Not provided"
+    if not symptoms:
+        return "Not provided"
+    return ", ".join(_sanitize_symptom(s) for s in symptoms)
 
 
 def _slot_selection(message: str) -> int | None:

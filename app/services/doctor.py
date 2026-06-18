@@ -186,20 +186,66 @@ def _help_message(name: str) -> str:
     )
 
 
+def _appt_is_today(appt: dict) -> bool:
+    from datetime import date as _date, datetime as _datetime
+    today = _date.today()
+    appt_dt = appt.get("appointment_datetime")
+    if appt_dt:
+        if isinstance(appt_dt, str):
+            try:
+                appt_dt = _datetime.fromisoformat(appt_dt)
+            except Exception:
+                appt_dt = None
+        if isinstance(appt_dt, _datetime):
+            return appt_dt.date() == today
+    # Fallback: parse date_str when appointment_datetime is missing or unparseable
+    _M = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    ds = (appt.get("date_str") or "").lower().strip()
+    if ds in {"today", "aaj"}:
+        return True
+    day_m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", ds)
+    mon_m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b", ds)
+    yr_m = re.search(r"\b(20\d{2})\b", ds)
+    if day_m and mon_m:
+        try:
+            yr = int(yr_m.group(1)) if yr_m else today.year
+            return _date(yr, _M[mon_m.group(1)[:3]], int(day_m.group(1))) == today
+        except Exception:
+            pass
+    return False
+
+
+_STATUS_LABEL = {
+    "active": "Confirmed",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+}
+
+
 def _format_today_appointments() -> str:
-    appointments = list(all_appointments().values())
-    if not appointments:
-        return "Today: no appointments are currently stored."
+    all_appts = list(all_appointments().values())
+    today_appts = [
+        a for a in all_appts
+        if _appt_is_today(a) and a.get("status", "active") != "cancelled"
+    ]
+
+    if not today_appts:
+        return "Today: no appointments scheduled for today."
 
     lines = ["Today appointments:"]
-    for index, appt in enumerate(appointments, start=1):
+    for index, appt in enumerate(today_appts, start=1):
         patient = appt.get("patient_name") or appt.get("from_number") or "Unknown patient"
         doctor = appt.get("doctor_name", "Doctor")
         date = appt.get("date_str", "TBD")
         time = appt.get("time_str", "TBD")
         symptoms = appt.get("symptoms") or []
         reason = f" - {', '.join(symptoms)}" if symptoms else ""
-        lines.append(f"{index}. {patient} with {doctor} - {date} at {time}{reason}")
+        status = appt.get("status", "active")
+        label = _STATUS_LABEL.get(status, status.capitalize())
+        lines.append(f"{index}. {patient} with {doctor} - {date} at {time}{reason} [{label}]")
 
     return "\n".join(lines)
 

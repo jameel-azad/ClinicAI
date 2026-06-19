@@ -124,11 +124,20 @@ def intent_node(state: BookingState) -> dict:
 
     context_message = None
     session_dict = state.get("session")
+
+    # last_bot_response is persisted to Redis after each reply but NOT written to
+    # the LangGraph checkpoint, so always read from Redis to get fresh context.
+    # This ensures the classifier knows what the bot last said (e.g. "Could you
+    # share the patient's name?") so it can correctly extract short replies like "Amit".
+    redis_session = get_session(from_number, clinic_id=clinic_id)
+
     if not session_dict:
-        redis_session = get_session(from_number, clinic_id=clinic_id)
         if redis_session:
             session_dict = redis_session.model_dump()
-    if session_dict:
+
+    if redis_session and redis_session.last_bot_response:
+        context_message = redis_session.last_bot_response
+    elif session_dict:
         context_message = session_dict.get("last_bot_response")
 
     initial = {
@@ -274,6 +283,7 @@ def lab_dispatch_node(state: BookingState) -> dict:
     result = _invoke_sub_agent(lab_agent_graph, state)
     return {
         "reply_message": result.get("reply_message", ""),
+        "session": result.get("session", state.get("session")),
         "pipeline_log": result.get("pipeline_log", []),
     }
 
@@ -326,6 +336,13 @@ def route_after_session(
         return "consultation_dispatch_node"
 
     if intent == "lab_report_share":
+        return "lab_dispatch_node"
+
+    # If the patient is mid-way through the lab report collection flow, route
+    # back to lab_dispatch_node even when the classifier returned a different
+    # intent (e.g. "general_query" when the user replied with just a name or
+    # "share with dr X" which can trip the injection guard).
+    if session_dict.get("state") == "LAB_COLLECTING":
         return "lab_dispatch_node"
 
     if intent in ("followup_query", "prescription_request"):

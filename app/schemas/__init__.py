@@ -122,6 +122,7 @@ BOOKING_FLOW_STATES = [
     "RESCHEDULE_CONFIRM",
     "SELECT_APPOINTMENT_CANCEL",
     "SELECT_APPOINTMENT_RESCHEDULE",
+    "LAB_COLLECTING",
 ]
 
 # Patient journey states (high-level lifecycle — used by ConsultationAgent in Sprint 2)
@@ -163,6 +164,7 @@ class BookingSession(BaseModel):
     doctor_shortlist: Optional[list[str]] = None  # ordered names shown in COLLECT_DOCTOR_PREFERENCE
     new_requested_date: Optional[str] = None   # used during RESCHEDULE_COLLECTING
     new_requested_time: Optional[str] = None   # used during RESCHEDULE_COLLECTING
+    lab_report_type: Optional[str] = None      # e.g. "xray", "blood test" — used during LAB_COLLECTING
     last_bot_response: Optional[str] = None    # for context-aware classification
     clinic_id: Optional[str] = None            # resolved from the Twilio "to" number
     clinic_twilio_number: Optional[str] = None  # clinic's own WhatsApp number — used as From in outbound messages

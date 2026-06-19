@@ -145,6 +145,18 @@ Output: {"intents":[{"intent":"appointment_book","confidence":0.95,"entities":{"
 Message: "haan theek hai"
 Output: {"intents":[{"intent":"appointment_book","confidence":0.97,"entities":{"patient_name":null,"doctor_name":"Dr Mehta","requested_date":"15 May","requested_time":"11:00 AM","symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
 
+[With context] Previous bot message: "Could you please share the patient's name and which report you'd like to share?"
+Message: "Alok"
+Output: {"intents":[{"intent":"lab_report_share","confidence":0.93,"entities":{"patient_name":"Alok","doctor_name":null,"requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
+
+[With context] Previous bot message: "Which doctor would you like to share the report with?"
+Message: "share with dr himanshu"
+Output: {"intents":[{"intent":"lab_report_share","confidence":0.95,"entities":{"patient_name":null,"doctor_name":"Dr Himanshu","requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
+
+[With context] Previous bot message: "Which doctor would you like to share the report with?"
+Message: "himanshu"
+Output: {"intents":[{"intent":"lab_report_share","confidence":0.92,"entities":{"patient_name":null,"doctor_name":"Himanshu","requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
+
 ---
 Now classify this message:
 """

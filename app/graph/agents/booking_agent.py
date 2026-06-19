@@ -723,6 +723,43 @@ def flow_node(state: BookingState) -> dict:
     if entities.get("requested_time"): session.requested_time = entities["requested_time"]
     if entities.get("symptoms_mentioned"): session.symptoms = entities["symptoms_mentioned"]
 
+    # Fallback: if the classifier returned patient_name=null for a bare name reply
+    # (happens when context is missing — e.g. "Amit" after bot asked for the name),
+    # accept the message directly when it looks like a plain name and no other entities
+    # were extracted (ruling out messages like "Dr Sharma 5 PM").
+    if (
+        not session.patient_name
+        and not entities.get("patient_name")
+        and booking_state == "COLLECTING_INFO"
+        and not any([
+            entities.get("doctor_name"),
+            entities.get("requested_date"),
+            entities.get("requested_time"),
+            entities.get("symptoms_mentioned"),
+        ])
+    ):
+        _raw_msg = incoming_message.strip()
+        _NO_NAME_TOKENS = {
+            "today", "tomorrow", "kal", "parso", "aaj", "monday", "tuesday",
+            "wednesday", "thursday", "friday", "saturday", "sunday",
+            "january", "february", "march", "april", "may", "june", "july",
+            "august", "september", "october", "november", "december",
+            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+            "am", "pm", "yes", "no", "ok", "okay", "haan", "nahi", "nhi",
+            "hi", "hello", "namaste", "fever", "pain", "cough", "cold",
+            "headache", "vomit", "cancel", "reschedule", "stop", "continue",
+            "book", "appointment", "dr", "doctor",
+        }
+        _words_lc = _raw_msg.lower().split()
+        if (
+            not re.search(r'[^\w\s.\-\',]', _raw_msg, flags=re.UNICODE)  # no invalid chars (@, #…)
+            and 2 <= len(_raw_msg) <= 50
+            and 1 <= len(_words_lc) <= 4
+            and not any(re.search(r'\d', w) for w in _words_lc)          # no digit tokens (dates/times)
+            and not any(w in _NO_NAME_TOKENS for w in _words_lc)
+        ):
+            session.patient_name = _raw_msg
+
     # Validate extracted doctor name against the clinic directory before accepting it.
     if entities.get("doctor_name"):
         from app.services.doctor_directory import (
@@ -977,8 +1014,21 @@ def reschedule_node(state: BookingState) -> dict:
             model=state.get("llm_model"),
             enc_key=state.get("llm_enc_key"),
         )
-        new_date = entities.get("requested_date") or session.new_requested_date
-        new_time = entities.get("requested_time") or session.new_requested_time
+        # Fallback 1: use classifier entities when the secondary extraction misses something
+        _cls = state.get("extracted_entities") or {}
+        new_date = entities.get("requested_date") or _cls.get("requested_date") or session.new_requested_date
+        new_time = entities.get("requested_time") or _cls.get("requested_time") or session.new_requested_time
+
+        # Fallback 2: direct regex for bare time strings like "4pm", "4.00 pm", "10:30 AM"
+        # (LLMs sometimes return null for very short single-field inputs)
+        if not new_time:
+            _tm = re.match(r"^\s*(\d{1,2})(?:[.:](\d{2}))?\s*(am|pm)\s*$", message.strip().lower())
+            if _tm:
+                _h = int(_tm.group(1))
+                _min = int(_tm.group(2)) if _tm.group(2) else 0
+                _mer = _tm.group(3).upper()
+                new_time = f"{_h}:{_min:02d} {_mer}"
+
         # Capture symptoms if provided during reschedule (e.g. patient mentions new symptoms)
         if entities.get("symptoms_mentioned"):
             session.symptoms = entities["symptoms_mentioned"]

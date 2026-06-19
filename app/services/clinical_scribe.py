@@ -307,8 +307,12 @@ def _resolve_patient_number(
             appointments = name_matches
 
     appointments.sort(key=lambda item: item.get("confirmed_at", ""), reverse=True)
-    if len(appointments) == 1:
-        return appointments[0].get("from_number")
+    # Return the number when all remaining appointments resolve to the same patient.
+    # The old check (== 1) broke for returning patients who have multiple appointments
+    # with the same doctor — they all share one from_number but len > 1.
+    unique_numbers = {a.get("from_number") for a in appointments if a.get("from_number")}
+    if len(unique_numbers) == 1:
+        return unique_numbers.pop()
     return None
 
 

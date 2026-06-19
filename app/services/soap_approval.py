@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+from datetime import datetime as _dt
 
 from app.services.clinical_scribe import get_scribe_pdf_path, _format_fhir_whatsapp_summary
 from app.services.store import delete_pending_soap, get_latest_soap_for_doctor, get_pending_soap, save_pending_soap
@@ -39,12 +40,15 @@ def handle_soap_button_reply(button_payload: str, doctor_number: str) -> str | N
 def handle_soap_approval_reply(message: str, doctor_number: str) -> str | None:
     upper = message.strip().upper()
 
-    approve_match = re.match(
+    # Use re.search (not re.match) so these commands are found even when
+    # the doctor quote-replies to the template — Twilio prepends the quoted
+    # message text, pushing the command away from position 0.
+    approve_match = re.search(
         r"APPROVE\s+((?:SOAP|RX)[A-F0-9]{6})(?:\s+(\+?\d[\d\s\-()+]{7,}\d))?", upper
     )
-    reject_match = re.match(r"REJECT\s+((?:SOAP|RX)[A-F0-9]{6})", upper)
+    reject_match = re.search(r"REJECT\s+((?:SOAP|RX)[A-F0-9]{6})", upper)
     # Match REGEN with original casing preserved so feedback text isn't uppercased
-    regen_match = re.match(
+    regen_match = re.search(
         r"REGEN\s+((?:SOAP|RX)[A-F0-9]{6})(?:\s+(.+))?",
         message.strip(),
         re.DOTALL | re.IGNORECASE,
@@ -127,8 +131,15 @@ def _approve(soap_id: str, override_number: str | None) -> str | None:
     summary_lines.append("\n_For the full prescription PDF, please contact the clinic._")
     summary_text = "\n".join(summary_lines)
 
-    send_whatsapp_message_sync(patient_number, summary_text, from_number=clinic_twilio_number)
+    summary_sent = send_whatsapp_message_sync(patient_number, summary_text, from_number=clinic_twilio_number)
     pdf_path = get_scribe_pdf_path(document_id) if document_id else None
+    if not summary_sent:
+        return (
+            f"⚠️ Approved but WhatsApp delivery to {patient_number} failed. "
+            f"Please forward the summary manually.\n"
+            f"Configure PUBLIC_BASE_URL to enable automatic PDF delivery.\n"
+            f"PDF path: {pdf_path or 'unavailable'}"
+        )
     return (
         f"✅ Approved. A text summary was sent to {patient_number}.\n"
         f"Configure PUBLIC_BASE_URL to enable automatic PDF delivery.\n"
@@ -296,8 +307,19 @@ def _save_consultation_record(soap: dict, patient_number: str, patient_name: str
                 and (not doctor_name or (a.doctor_name or "").lower().strip() == doctor_name)
             ]
             if relevant:
-                relevant.sort(key=lambda a: a.confirmed_at or "", reverse=True)
-                appointment_date = relevant[0].date_str
+                # Sort by actual scheduled appointment time (not booking-confirmation
+                # time) so the record matches the appointment that just occurred, not
+                # the one most recently booked. Fall back to confirmed_at when
+                # appointment_datetime is missing, and to datetime.min as a last resort.
+                _now = _dt.now()
+                relevant.sort(
+                    key=lambda a: a.appointment_datetime or a.confirmed_at or _dt.min,
+                    reverse=True,
+                )
+                # Prefer the most recent past/today appointment; only fall back to
+                # the overall newest if no past appointment exists yet (edge case).
+                _past = [a for a in relevant if (a.appointment_datetime or _dt.max) <= _now]
+                appointment_date = (_past[0] if _past else relevant[0]).date_str
         except Exception:
             pass
 

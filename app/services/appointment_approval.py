@@ -564,6 +564,10 @@ def _reject(approval: dict) -> str:
 
 def _approval_action(message: str) -> str | None:
     lower = message.lower().strip()
+    # Never match a SOAP/prescription approval command — those are handled by
+    # soap_approval.py and must not fall through to the appointment handler.
+    if re.search(r"\b(approve|reject|regen)\s+(?:soap|rx)[a-f0-9]{6}\b", lower):
+        return None
     if re.search(r"\b(yes|approve|approved|ok|confirm)\b", lower):
         return "approve"
     if re.search(r"\b(no|reject|rejected|decline|deny)\b", lower):

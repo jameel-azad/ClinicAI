@@ -150,6 +150,26 @@ def _handle_context_reply(message: str, doctor_number: str, doctor_name: str, te
     if not patient_number or not message.strip():
         return None
 
+    # Guard: if the doctor has a pending SOAP note and their message looks like
+    # they are trying to manually tell the patient the prescription was sent,
+    # redirect them to the APPROVE command instead of silently relaying text.
+    # Without this, the patient receives only a freetext relay ("Dr. X: prescription
+    # sent") and never gets the actual clinical note.
+    if re.search(r"\bprescri|\brx\b|\bmedic|\bconsult|\bnote\b|\breport\b", message.lower()):
+        try:
+            from app.services.store import get_latest_soap_for_doctor
+            pending = get_latest_soap_for_doctor(doctor_number)
+            if pending:
+                soap_id = pending.get("soap_id", "")
+                return (
+                    f"⚠️ There is a prescription note waiting for approval for *{patient_name}*.\n\n"
+                    f"To send the actual prescription to the patient, please approve it:\n"
+                    f"✅ *APPROVE {soap_id}* — sends the consultation note to {patient_name}\n\n"
+                    f"_Your message was NOT forwarded. Use APPROVE to deliver the prescription._"
+                )
+        except Exception:
+            pass
+
     outbound = f"📩 *Dr. {_strip_dr(doctor_name)}:* {message.strip()}"
     sent = send_whatsapp_message_sync(patient_number, outbound, from_number=clinic_twilio_number)
     if sent:

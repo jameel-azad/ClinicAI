@@ -683,17 +683,58 @@ def flow_node(state: BookingState) -> dict:
             }
         if status == "rejected":
             session = BookingSession(**session_dict) if session_dict else BookingSession(from_number=from_number)
+
+            # Capture any date/time the patient already sent in this message so they
+            # don't have to repeat themselves after a rejection (Bug: slot appears blocked).
+            new_date = entities.get("requested_date") or None
+            new_time = entities.get("requested_time") or None
+
+            if new_date and new_time:
+                # Patient included a new slot in the same message — attempt rebooking now.
+                session.requested_date = new_date
+                session.requested_time = new_time
+                session.new_requested_date = None
+                session.new_requested_time = None
+                reply, approval_id = request_doctor_approval(session, from_number)
+                session.state = "WAITING_DOCTOR_APPROVAL" if approval_id else "CONFIRM_SLOT"
+                return {
+                    "session": session.model_dump(),
+                    "current_booking_state": session.state,
+                    "appointment_id": approval_id,
+                    "reply_message": reply,
+                    "pipeline_log": [
+                        f"flow_node: WAITING_DOCTOR_APPROVAL rejected — inline rebook to "
+                        f"{new_date} {new_time}, approval={approval_id}"
+                    ],
+                }
+
+            # Partial or no date/time — save what we have and ask for the rest.
             session.state = "RESCHEDULE_COLLECTING"
-            session.new_requested_date = None
-            session.new_requested_time = None
-            return {
-                "session": session.model_dump(),
-                "current_booking_state": "RESCHEDULE_COLLECTING",
-                "reply_message": (
+            session.new_requested_date = new_date
+            session.new_requested_time = new_time
+
+            if new_date and not new_time:
+                ask_msg = (
+                    "The doctor could not approve that slot. "
+                    f"Got *{new_date}* — what time would you prefer?\n"
+                    "_(e.g. '5 PM', '3:30 PM')_"
+                )
+            elif new_time and not new_date:
+                ask_msg = (
+                    "The doctor could not approve that slot. "
+                    f"Got *{new_time}* — what date would you prefer?\n"
+                    "_(e.g. '26 June', 'next Monday')_"
+                )
+            else:
+                ask_msg = (
                     "The doctor could not approve that slot. "
                     "Please share a new preferred date and time.\n"
                     "_(e.g. '26th June at 4 PM')_"
-                ),
+                )
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": ask_msg,
                 "pipeline_log": ["flow_node: doctor rejected, session preserved, collecting new date/time"],
             }
         if status == "cancelled":
@@ -1501,9 +1542,10 @@ def route_booking(
     intent = state.get("intent", "general_query")
     booking_state = state.get("current_booking_state", "GREETING")
 
-    if intent == "appointment_status":
-        return "appointment_status_node"
-
+    # Session-state routing takes absolute priority over intent-based routing.
+    # This prevents mid-flow numeric replies (e.g. "1" to select an appointment)
+    # from being misclassified as appointment_status and sent to the wrong node,
+    # which caused an infinite selection loop (Bugs 2 & 3).
     if booking_state in (
         "SELECT_APPOINTMENT_RESCHEDULE", "RESCHEDULE_COLLECTING", "RESCHEDULE_CONFIRM"
     ):
@@ -1512,14 +1554,18 @@ def route_booking(
     if booking_state in ("SELECT_APPOINTMENT_CANCEL", "CANCEL_CONFIRM"):
         return "cancel_node"
 
+    if booking_state == "CONFIRM_SLOT":
+        return "confirm_node"
+
+    # Intent-based routing — only reached when no active multi-step flow is in progress.
+    if intent == "appointment_status":
+        return "appointment_status_node"
+
     if intent == "appointment_reschedule":
         return "reschedule_node"
 
     if intent == "appointment_cancel":
         return "cancel_node"
-
-    if booking_state == "CONFIRM_SLOT":
-        return "confirm_node"
 
     if booking_state not in ("GREETING", "BOOKED"):
         return "flow_node"

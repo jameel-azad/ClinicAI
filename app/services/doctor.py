@@ -271,17 +271,31 @@ def _format_today_appointments() -> str:
 
 
 def _handle_lab_review_ack(message: str, doctor_number: str, doctor_name: str, clinic_twilio_number: str | None = None) -> str | None:
-    """Handle doctor saying 'OK LAB123' — notifies the patient."""
+    """Handle doctor saying 'OK LAB123' — notifies the patient.
+
+    Handles common WhatsApp formatting variants (bold *, curly braces, etc.) and
+    bare 'OK' (no explicit ID) by auto-matching the most recent pending review.
+    """
+    from app.services.store import get_latest_lab_review_for_doctor
     from app.services.whatsapp import send_whatsapp_message_sync
 
-    match = re.search(r"\bOK\s+(LAB[A-Z0-9]{6})\b", message.strip().upper())
-    if not match:
-        return None
+    # Strip WhatsApp markdown and template-style brackets that can wrap the lab ID
+    cleaned = re.sub(r"[*_~`{}\[\]]", "", message.strip())
 
-    lab_id = match.group(1)
-    review = get_pending_lab_review(lab_id)
-    if not review:
-        return f"Lab review *{lab_id}* not found or already acknowledged."
+    match = re.search(r"\bOK\s+(LAB[A-Z0-9]{6})\b", cleaned.upper())
+    if match:
+        lab_id = match.group(1)
+        review = get_pending_lab_review(lab_id)
+        if not review:
+            return f"Lab review *{lab_id}* not found or already acknowledged."
+    else:
+        # Bare "OK" / "ok" with no explicit lab ID — auto-ack the latest pending review
+        if not re.match(r"^\s*ok\s*$", cleaned, re.IGNORECASE):
+            return None
+        review = get_latest_lab_review_for_doctor(doctor_number)
+        if not review:
+            return None
+        lab_id = review.get("lab_id", "")
 
     patient_number = review.get("patient_number", "")
     patient_name = review.get("patient_name") or "patient"

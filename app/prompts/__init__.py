@@ -68,7 +68,7 @@ AMBIGUITY: For short/unclear messages ("ok", "kal", "haan") without context:
 - confidence < 0.5, provide bot_response asking how you can help, make best guess at intent.
 - With context (previous bot message), use it to raise confidence appropriately.
 
-MISSING INFO — CRITICAL: For every intent (except emergency, appointment_status, consultation_message), check ALL essential fields below.
+MISSING INFO — CRITICAL: For every intent (except emergency, appointment_status, consultation_message, lab_report_share), check ALL essential fields below.
 If ANY are null, you MUST generate a `bot_response` that politely asks for EVERY null field in ONE combined question.
 
 Required fields per intent:
@@ -77,7 +77,7 @@ Required fields per intent:
 - appointment_reschedule: patient_name, new requested_date, new requested_time
 - appointment_status: patient_name (to look up their booking)
 - followup_query: patient_name + what the follow-up is about (which visit/report/medicine)
-- lab_report_share: patient_name + which specific report
+- lab_report_share: extract patient_name and doctor_name if mentioned; set bot_response to null (the lab agent handles all collection)
 - prescription_request: patient_name + medication_mentioned (name and dosage)
 - general_query: no required fields. Provide a helpful answer to their question.
 - emergency: NEVER ask — set bot_response to null immediately.
@@ -156,6 +156,18 @@ Output: {"intents":[{"intent":"lab_report_share","confidence":0.95,"entities":{"
 [With context] Previous bot message: "Which doctor would you like to share the report with?"
 Message: "himanshu"
 Output: {"intents":[{"intent":"lab_report_share","confidence":0.92,"entities":{"patient_name":null,"doctor_name":"Himanshu","requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
+
+[With context] Previous bot message: "Sure! To share a lab report, I need two things: 1) Patient's full name 2) Doctor's name"
+Message: "Rahul Sharma"
+Output: {"intents":[{"intent":"lab_report_share","confidence":0.95,"entities":{"patient_name":"Rahul Sharma","doctor_name":null,"requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
+
+[With context] Previous bot message: "Perfect! Please send the blood test PDF in this chat now. Already sent? Reply *sent*."
+Message: "sent"
+Output: {"intents":[{"intent":"lab_report_share","confidence":0.97,"entities":{"patient_name":null,"doctor_name":null,"requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
+
+[With context] Previous bot message: "Perfect! Please send the blood test PDF in this chat now."
+Message: "already sent"
+Output: {"intents":[{"intent":"lab_report_share","confidence":0.96,"entities":{"patient_name":null,"doctor_name":null,"requested_date":null,"requested_time":null,"symptoms_mentioned":null,"medication_mentioned":null},"bot_response":null}]}
 
 ---
 Now classify this message:

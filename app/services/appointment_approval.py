@@ -19,6 +19,8 @@ from app.services.identity import find_doctor_number, normalize_whatsapp_number
 from app.services.scheduler import schedule_reminder
 from app.services.store import (
     all_appointments,
+    all_pending_approvals,
+    cancel_appointment,
     find_doctor_profile_by_name,
     get_latest_approval_for_patient,
     get_pending_approval,
@@ -328,6 +330,11 @@ def handle_doctor_approval_reply(message: str, doctor_number: str) -> str | None
             ids = ", ".join(item["approval_id"] for item in waiting)
             return f"Please include the request ID. Pending requests: {ids}"
         else:
+            # No pending approvals — allow doctor to cancel an already-approved appointment
+            if action == "reject":
+                recent = _get_latest_approved_for_doctor(normalized_doctor)
+                if recent:
+                    return _cancel_approved_appointment(recent)
             return "There are no pending appointment approvals for you right now."
 
     approval = get_pending_approval(approval_id)
@@ -337,8 +344,11 @@ def handle_doctor_approval_reply(message: str, doctor_number: str) -> str | None
     if approval.get("doctor_number") != normalized_doctor:
         return "This appointment request is assigned to another doctor number."
 
-    if approval.get("status") != "waiting_doctor":
-        return f"Request {approval_id} is already {approval.get('status')}."
+    current_status = approval.get("status")
+    if current_status == "approved" and action == "reject":
+        return _cancel_approved_appointment(approval)
+    elif current_status != "waiting_doctor":
+        return f"Request {approval_id} is already {current_status}."
 
     if action == "approve":
         return _approve(approval)
@@ -364,8 +374,11 @@ def handle_appointment_button_reply(button_payload: str, doctor_number: str) -> 
         if approval.get("doctor_number") != normalized_doctor:
             return "This appointment request is assigned to another doctor number."
 
-        if approval.get("status") != "waiting_doctor":
-            return f"Request {approval_id_raw} is already {approval.get('status')}."
+        current_status = approval.get("status")
+        if current_status == "approved" and action == "reject":
+            return _cancel_approved_appointment(approval)
+        elif current_status != "waiting_doctor":
+            return f"Request {approval_id_raw} is already {current_status}."
 
         if action == "approve":
             return _approve(approval)
@@ -467,6 +480,66 @@ def latest_patient_approval_status(patient_number: str) -> str | None:
     if not approval:
         return None
     return approval.get("status")
+
+
+def _cancel_approved_appointment(approval: dict) -> str:
+    """Cancel a previously-approved appointment when the doctor overrides their decision.
+
+    Cancels the appointment record, resets the patient's session, and notifies the patient.
+    """
+    approval_id = approval["approval_id"]
+    patient_number = approval["patient_number"]
+    clinic_twilio_number = approval.get("clinic_twilio_number")
+    clinic_id = approval.get("clinic_id")
+
+    cancel_appointment(approval_id)
+    update_pending_approval(approval_id, status="rejected")
+
+    if clinic_id:
+        try:
+            from app.services.patient_service import update_appointment_status_in_db
+            from app.services.async_runner import run_async
+            run_async(update_appointment_status_in_db(approval_id, "cancelled"), timeout=5)
+        except Exception as exc:
+            print(f"[WARN] DB status update failed for cancelled appointment {approval_id}: {exc}")
+
+    try:
+        from app.services.store import get_session, save_session
+        patient_session = get_session(patient_number, clinic_id=clinic_id)
+        if patient_session and patient_session.state in ("BOOKED", "WAITING_DOCTOR_APPROVAL"):
+            patient_session.state = "GREETING"
+            patient_session.journey_state = "NEW_PATIENT"
+            save_session(patient_session)
+    except Exception as exc:
+        print(f"[WARN] Could not reset patient session for {patient_number}: {exc}")
+
+    send_whatsapp_message_sync(
+        patient_number,
+        (
+            f"❌ Your appointment with *{approval.get('doctor_name') or 'the doctor'}* on "
+            f"*{approval.get('date_str')}* at *{approval.get('time_str')}* has been cancelled "
+            "by the doctor.\n\n"
+            "Please send another preferred date and time and we'll find you a new slot."
+        ),
+        from_number=clinic_twilio_number,
+    )
+    return f"Cancelled {approval_id}. I have notified the patient."
+
+
+def _get_latest_approved_for_doctor(doctor_number: str) -> dict | None:
+    """Return the most recently approved (but not yet cancelled) appointment for a doctor.
+
+    Used when the doctor sends 'Reject' with no ID and no pending approvals remain,
+    allowing them to cancel an appointment they already approved.
+    """
+    matches = [
+        a for a in all_pending_approvals().values()
+        if a.get("doctor_number") == doctor_number and a.get("status") == "approved"
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    return matches[0]
 
 
 def _approve(approval: dict) -> str:

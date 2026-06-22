@@ -239,17 +239,47 @@ async def save_lab_record(
     patient_name: Optional[str],
     lab_result: dict,  # output from lab pipeline
     pdf_url: Optional[str] = None,
+    doctor_phone: Optional[str] = None,
+    doctor_name_hint: Optional[str] = None,
 ) -> Optional[str]:
     """Persist a MedicalRecord of type lab_report."""
+    import re as _re
+    from sqlalchemy import or_
     from app.models.medical_record import MedicalRecord
+    from app.models.doctor import Doctor
 
     try:
         async with AsyncSessionLocal() as db:
             patient_id = await upsert_patient(clinic_id, patient_phone, patient_name, db=db)
 
+            # Resolve doctor_id from phone number when provided
+            doctor_id: Optional[str] = None
+            resolved_doctor_name: Optional[str] = doctor_name_hint
+            if doctor_phone:
+                digits = _re.sub(r"\D", "", doctor_phone)
+                dr = await db.execute(
+                    select(Doctor).where(
+                        Doctor.clinic_id == clinic_id,
+                        Doctor.is_active == True,
+                        or_(
+                            Doctor.whatsapp_number == f"+{digits}",
+                            Doctor.whatsapp_number == digits,
+                        ),
+                    )
+                )
+                dr_row = dr.scalar_one_or_none()
+                if dr_row:
+                    doctor_id = dr_row.id
+                    resolved_doctor_name = dr_row.name
+
+            patient_info = lab_result.get("patient_info") or {}
+            doctor_summary = lab_result.get("doctor_summary") or ""
+
             record = MedicalRecord(
                 patient_id=patient_id,
                 clinic_id=clinic_id,
+                doctor_id=doctor_id,
+                doctor_name=resolved_doctor_name,
                 visit_date=datetime.utcnow(),
                 record_type="lab_report",
                 lab_panel_type=lab_result.get("panel_type"),
@@ -257,6 +287,8 @@ async def save_lab_record(
                     "all_values": lab_result.get("all_values", []),
                     "abnormals": lab_result.get("abnormals", []),
                     "criticals": lab_result.get("criticals", []),
+                    "patient_info": patient_info,
+                    "doctor_summary": doctor_summary,
                 },
                 pdf_url=pdf_url,
             )

@@ -13,7 +13,7 @@ Also detect the panel type from the test names present.
 
 Return ONLY valid JSON matching this exact schema:
 {
-  "panel_type": "<CBC|LFT|KFT|LIPID|THYROID|MIXED|UNKNOWN>",
+  "panel_type": "<CBC|LFT|KFT|LIPID|THYROID|HBA1C|URINE|CULTURE|MIXED|UNKNOWN>",
   "patient_info": {
     "name": "<name|''>", "age": "<age|''>", "gender": "<Male|Female|Other|''>",
     "dob": "<dob|''>", "patient_id": "<id|''>", "lab_name": "<lab|''>",
@@ -24,21 +24,36 @@ Return ONLY valid JSON matching this exact schema:
   ]
 }
 
+PATIENT NAME EXTRACTION (high priority):
+The patient name almost always appears at the top of the report in the header block.
+Look for it under any of these labels (case-insensitive):
+  "Name:", "Patient Name:", "Pt. Name:", "Patient:", "P. Name:", "Client Name:",
+  "Patient Name", "Ref. By", "Referred By"
+Also extract names that appear after titles: Mr., Mrs., Ms., Sh., Smt., Dr., Master
+Indian name formats include: "Ramesh Kumar Sharma", "Priya Devi", "Sh. Rajesh Mehta"
+If multiple plausible names appear, use the one labelled as the patient (not the doctor).
+Extract the FULL name as written. Do NOT guess or hallucinate; use '' if truly absent.
+
 Panel detection rules:
-- CBC: contains Haemoglobin/Hemoglobin/Hb, WBC/TLC, Platelets, RBC, MCV, MCH
-- LFT: contains Bilirubin, SGOT/AST, SGPT/ALT, Alkaline Phosphatase/ALP, Albumin
-- KFT: contains Creatinine, Urea/BUN, Uric Acid, eGFR, Electrolytes (Na/K/Cl)
-- LIPID: contains Total Cholesterol, LDL, HDL, Triglycerides, VLDL
-- THYROID: contains TSH, T3, T4, Free T3/FT3, Free T4/FT4
-- MIXED: contains parameters from multiple panels
-- UNKNOWN: cannot determine
+- CBC: Haemoglobin/Hemoglobin/Hb, WBC/TLC, Platelets, RBC, MCV, MCH, MCHC
+- LFT: Bilirubin, SGOT/AST, SGPT/ALT, Alkaline Phosphatase/ALP, Albumin, GGT
+- KFT: Creatinine, Urea/BUN, Uric Acid, eGFR, Electrolytes (Na/K/Cl)
+- LIPID: Total Cholesterol, LDL, HDL, Triglycerides, VLDL
+- THYROID: TSH, T3, T4, Free T3/FT3, Free T4/FT4
+- HBA1C: HbA1c / Glycated Haemoglobin (standalone)
+- URINE: Urine R/M, Urine Routine/Microscopy, Specific Gravity, pH, Casts, Cells
+- CULTURE: Culture & Sensitivity, Blood/Urine/Sputum Culture, Colony Count, MIC
+- MIXED: parameters from two or more panels above
+- UNKNOWN: cannot determine from test names
 
 Rules:
 - Never hallucinate. Use empty string '' if a field is missing.
-- Include ALL test rows, even if value is 'Not Done' or '-'.
+- Include ALL test rows, even if value is 'Not Done', 'Nil', or '-'.
 - Output raw JSON only. Do not wrap in markdown (```json). No preamble.
 - Handle Indian lab formats: ranges like '13.0-17.0 g/dl', '< 40 U/L', 'Upto 1.2 mg/dl'.
-- Handle comma-formatted numbers: '1,50,000' → treat as 150000.
+- Handle comma-formatted numbers (Indian style): '1,50,000' → treat as 150000.
+- Common Indian lab layouts (SRL, Thyrocare, Lal PathLabs, Metropolis, AIIMS, Apollo)
+  always put patient name/age/gender in the first section — check there first.
 """
 
 SUMMARY_AND_CRITICALS_SYSTEM = """You are a strict clinical summarization API.
@@ -88,10 +103,12 @@ Return ONLY valid JSON matching this exact schema:
 }
 
 Summary Rules:
-- Start with: 'Patient [name], [age][gender].'
-- Mention the panel type and number of tests.
-- Highlight key abnormals with values and reference ranges.
-- Explicitly call out any critical values with urgency (e.g., 'CRITICAL: ...').
+- PATIENT IDENTITY: If the patient name is known and non-empty, start with 'Patient [name], [age][gender].'
+  If name is unknown or blank, start with 'Lab report for [age][gender] patient.' (never write "Unknown patient").
+  If age/gender are also unknown, start with 'Lab report received.'
+- Mention the panel type and number of tests performed.
+- Highlight key abnormal values with their actual values and reference ranges.
+- Explicitly call out any critical values with urgency (e.g., 'CRITICAL: Haemoglobin 5.2 g/dL — transfusion threshold.').
 - End with 'No critical values detected.' if there are none.
-- 3-5 sentences. No markdown, no bullet points. Plain English only.
+- 3-5 sentences total. No markdown, no bullet points. Plain English only.
 """

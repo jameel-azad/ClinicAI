@@ -8,6 +8,19 @@ from app.schemas import BookingState, BookingSession
 
 load_dotenv()
 
+# Keywords that indicate the doctor prescribed lab tests in the SOAP plan
+_LAB_KEYWORDS = frozenset([
+    "blood test", "cbc", "complete blood count", "urine test", "urinalysis",
+    "urine analysis", "urine culture", "x-ray", "xray", "ultrasound", "mri",
+    "ct scan", "ecg", "echo", "echocardiogram", "thyroid", "lipid profile",
+    "hba1c", "sugar test", "hemoglobin", "haemoglobin", "creatinine",
+    "liver function", "kidney function", "cholesterol", "covid test",
+    "dengue", "malaria", "biopsy", "pathology", "lab", "laboratory",
+    "diagnostic", "investigations", "blood work", "test ordered",
+    "tests ordered", "refer for", "send for", "get tested", "get a test",
+    "follow-up test", "repeat test", "blood count", "serum", "culture",
+])
+
 # Tokens that are never a patient name (dates, commands, report keywords, etc.)
 _NO_NAME_TOKENS = {
     "today", "tomorrow", "kal", "parso", "aaj",
@@ -77,6 +90,29 @@ def _looks_like_name(text: str) -> bool:
     )
 
 
+def _prescription_has_lab_tests(clinic_id: str | None, from_number: str) -> bool:
+    """Return True if the latest consultation SOAP plan contains lab-test keywords.
+
+    Fails open (returns True) when the DB is unreachable — avoids blocking patients
+    on infrastructure issues.
+    """
+    if not clinic_id or not from_number:
+        return True  # can't verify → fail open
+    try:
+        from app.services.patient_service import get_latest_consultation_record
+        from app.services.async_runner import run_async
+        record = run_async(get_latest_consultation_record(clinic_id, from_number), timeout=5)
+        if not record:
+            return False
+        text = " ".join(filter(None, [
+            record.get("soap_plan") or "",
+            record.get("soap_assessment") or "",
+        ])).lower()
+        return any(kw in text for kw in _LAB_KEYWORDS)
+    except Exception:
+        return True  # fail open on infrastructure errors
+
+
 def lab_node(state: BookingState) -> dict:
     """
     Stateful lab report info-collection node.
@@ -94,6 +130,39 @@ def lab_node(state: BookingState) -> dict:
     entities = state.get("extracted_entities") or {}
     incoming = (state.get("incoming_message") or "").strip()
     booking_state = session.state if session else "GREETING"
+
+    # ── Validation (first-entry only — skip when already mid-collection) ─────
+    if booking_state not in ("LAB_COLLECTING", "LAB_PDF_REQUESTED"):
+        from_number = state.get("from_number", "")
+        clinic_id = state.get("clinic_id")
+        journey_state = session.journey_state if session else "NEW_PATIENT"
+
+        # Req 1: Appointment dependency — must have had at least one non-cancelled appointment
+        if journey_state not in ("POST_CONSULT", "FOLLOW_UP_PENDING"):
+            from app.services.store import get_appointments_by_number
+            appts = get_appointments_by_number(from_number)
+            has_appointment = any(getattr(a, "status", "active") != "cancelled" for a in appts)
+            if not has_appointment:
+                return {
+                    "reply_message": (
+                        "Lab reports can only be shared *after* a completed appointment with the doctor. 📅\n\n"
+                        "Please *book an appointment* first and visit the clinic before sharing any lab reports."
+                    ),
+                    "session": session.model_dump() if session else session_dict,
+                    "pipeline_log": ["lab_agent: blocked — no completed appointment on record"],
+                }
+
+        # Req 2: Prescription authorization — doctor must have ordered lab tests
+        if not _prescription_has_lab_tests(clinic_id, from_number):
+            return {
+                "reply_message": (
+                    "You can only share lab reports if the doctor *prescribed diagnostic tests* "
+                    "during your consultation. 🔬\n\n"
+                    "If you believe tests were ordered, please contact the clinic directly."
+                ),
+                "session": session.model_dump() if session else session_dict,
+                "pipeline_log": ["lab_agent: blocked — no lab tests found in prescription"],
+            }
 
     # ── 0. Handle LAB_PDF_REQUESTED: user replied after being asked to forward PDF ──
     if booking_state == "LAB_PDF_REQUESTED":
@@ -160,21 +229,27 @@ def lab_node(state: BookingState) -> dict:
 
     if needs_name and needs_doctor:
         reply = (
-            "Could you please share the *patient's name* and "
-            "*which doctor* you'd like to share the report with?"
+            "Sure! To share a lab report, I need two things:\n\n"
+            "1️⃣ *Patient's full name* _(e.g. Rahul Sharma)_\n"
+            "2️⃣ *Doctor's name* _(e.g. Dr. Anjali or just Anjali)_\n\n"
+            "Please share both and I'll get it across right away."
         )
         if session:
             session.state = "LAB_COLLECTING"
 
     elif needs_name:
-        reply = "Could you please share the *patient's name* for this report?"
+        reply = (
+            "What is the *patient's full name* for this report?\n"
+            "_(e.g. Rahul Sharma)_"
+        )
         if session:
             session.state = "LAB_COLLECTING"
 
     elif needs_doctor:
         patient_display = session.patient_name if session else "the patient"
         reply = (
-            f"Which *doctor* would you like to share {patient_display}'s report with?"
+            f"Got it — which *doctor* should receive *{patient_display}*'s report?\n"
+            f"_(e.g. Dr. Anjali — just the name is fine)_"
         )
         if session:
             session.state = "LAB_COLLECTING"
@@ -188,9 +263,12 @@ def lab_node(state: BookingState) -> dict:
         )
         rtype = (session.lab_report_type if session else None) or "report"
         reply = (
-            f"Please *forward the {rtype} PDF* for *{patient_display}* to this "
-            f"WhatsApp number and we'll share it with *{doctor_display}* for review. 🙏\n\n"
-            f"_Already sent the PDF? Our team will process it shortly._"
+            f"Perfect! Please *send the {rtype} PDF* in this chat now 📎\n\n"
+            f"*For:* {patient_display}\n"
+            f"*Doctor:* {doctor_display}\n\n"
+            f"_How to send:_ Tap the 📎 attachment icon → *Document* → select your PDF file.\n\n"
+            f"Once received, we'll process it and forward it to {doctor_display} for review. 🙏\n\n"
+            f"_Already sent the PDF? Just reply *sent* and we'll confirm._"
         )
         if session:
             # Await the PDF forward; keep state so "already sent" is handled cleanly

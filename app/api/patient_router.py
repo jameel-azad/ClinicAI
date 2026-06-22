@@ -83,6 +83,20 @@ class MedicalRecordOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LabReportOut(BaseModel):
+    """Structured view of a lab report record for the doctor dashboard."""
+    id: str
+    created_at: datetime
+    pdf_url: Optional[str]
+    panel_type: Optional[str]
+    patient_info: Optional[Dict[str, Any]]   # extracted: name, age, gender, lab_name, report_date
+    doctor_summary: Optional[str]            # AI-generated summary
+    abnormals: Optional[List[Any]]           # HIGH / LOW values
+    criticals: Optional[List[Any]]           # CRITICAL values
+    all_values: Optional[List[Any]]          # all test rows
+    doctor_name: Optional[str]
+
+
 class PatientUpdateRequest(BaseModel):
     name: Optional[str] = None
     age: Optional[int] = None
@@ -399,3 +413,58 @@ async def list_patient_records(
         )
 
     return records
+
+
+# ---------------------------------------------------------------------------
+# GET /{patient_id}/lab-reports  — lab report history for doctor dashboard
+# ---------------------------------------------------------------------------
+
+@router.get("/{patient_id}/lab-reports", response_model=List[LabReportOut])
+async def list_patient_lab_reports(
+    clinic_id: str,
+    patient_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: ClinicUser = Depends(get_current_admin),
+):
+    """Return all lab reports for a patient with full extracted details and AI summary.
+
+    Access control: clinic admin or superadmin only (enforced via get_current_admin).
+    The patient's PDF is linked via pdf_url and is served at /lab-report/pdf/{document_id}.
+    """
+    clinic = await _get_clinic_or_404(clinic_id, db)
+    _require_clinic_access(clinic, current_user)
+    await _get_patient_or_404(patient_id, clinic_id, db)
+
+    result = await db.execute(
+        select(MedicalRecord, func.coalesce(Doctor.name, MedicalRecord.doctor_name).label("doctor_name"))
+        .outerjoin(Doctor, MedicalRecord.doctor_id == Doctor.id)
+        .where(
+            MedicalRecord.patient_id == patient_id,
+            MedicalRecord.clinic_id == clinic_id,
+            MedicalRecord.record_type == "lab_report",
+        )
+        .order_by(MedicalRecord.visit_date.desc())
+    )
+    rows = result.all()
+
+    reports: List[LabReportOut] = []
+    for row in rows:
+        record: MedicalRecord = row[0]
+        doctor_name: Optional[str] = row[1]
+        lr = record.lab_results or {}
+        reports.append(
+            LabReportOut(
+                id=record.id,
+                created_at=record.created_at,
+                pdf_url=record.pdf_url,
+                panel_type=record.lab_panel_type,
+                patient_info=lr.get("patient_info"),
+                doctor_summary=lr.get("doctor_summary"),
+                abnormals=lr.get("abnormals"),
+                criticals=lr.get("criticals"),
+                all_values=lr.get("all_values"),
+                doctor_name=doctor_name,
+            )
+        )
+
+    return reports

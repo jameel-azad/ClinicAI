@@ -163,6 +163,51 @@ def format_report_reply(state: dict) -> str:
     return "\n".join(reply_lines)
 
 
+async def _check_lab_auth(from_number: str, clinic_id: str | None) -> str | None:
+    """Validate that the patient is authorized to share a lab report.
+
+    Returns an error message string if blocked, or None if the patient may proceed.
+    Checks:
+      1. Appointment dependency — patient must have at least one non-cancelled appointment.
+      2. Prescription authorization — doctor must have ordered lab tests in the SOAP plan.
+    """
+    from app.services.store import get_appointments_by_number, get_session
+    from app.services.patient_service import get_latest_consultation_record
+    from app.graph.agents.lab_agent import _LAB_KEYWORDS
+
+    # Check 1: must have a non-cancelled appointment
+    try:
+        appts = await asyncio.to_thread(get_appointments_by_number, from_number)
+        has_appointment = any(getattr(a, "status", "active") != "cancelled" for a in appts)
+        if not has_appointment:
+            return (
+                "Lab reports can only be shared *after* a completed appointment with the doctor. 📅\n\n"
+                "Please book an appointment first."
+            )
+    except Exception as exc:
+        logger.warning("[pdf_service] Appointment check failed for %s: %s", from_number, exc)
+
+    # Check 2: doctor must have prescribed lab tests in most recent consultation
+    if clinic_id:
+        try:
+            record = await get_latest_consultation_record(clinic_id, from_number)
+            if record:
+                text = " ".join(filter(None, [
+                    record.get("soap_plan") or "",
+                    record.get("soap_assessment") or "",
+                ])).lower()
+                if not any(kw in text for kw in _LAB_KEYWORDS):
+                    return (
+                        "You can only share lab reports if the doctor *prescribed diagnostic tests* "
+                        "during your consultation. 🔬\n\n"
+                        "If tests were ordered, please contact the clinic directly."
+                    )
+        except Exception as exc:
+            logger.warning("[pdf_service] Prescription check failed for %s: %s", from_number, exc)
+
+    return None
+
+
 async def handle_incoming_pdf(
     media_id: str,
     from_number: str = "",
@@ -171,12 +216,23 @@ async def handle_incoming_pdf(
 ) -> str:
     """
     Handle a WhatsApp PDF from a patient:
-    1. Download + safety check + parse (pipeline runs in a thread to avoid blocking the event loop)
-    2. Forward the full report summary to the doctor(s)
-    3. Return a brief acknowledgment to the patient
+    1. Validate appointment dependency + prescription authorization
+    2. Download + safety check + parse (pipeline runs in a thread to avoid blocking the event loop)
+    3. Forward the full report summary to the doctor(s)
+    4. Return a brief acknowledgment to the patient
     """
     if not lab_report_pipeline:
         return "Sorry, the report parser is currently offline."
+
+    # Resolve clinic_id from the patient's session (needed for validation + DB save)
+    from app.services.store import get_session
+    _booking_session = await asyncio.to_thread(get_session, from_number)
+    clinic_id = _booking_session.clinic_id if _booking_session else None
+
+    # Gate: appointment dependency + prescription authorization
+    auth_error = await _check_lab_auth(from_number, clinic_id)
+    if auth_error:
+        return auth_error
 
     temp_path = None
     try:
@@ -186,13 +242,26 @@ async def handle_incoming_pdf(
             return "This document does not appear to be a valid lab report or could not be verified for safety."
 
         print(f"[Parser] Invoking pipeline for {temp_path}")
+        _name_hint = (_booking_session.patient_name if _booking_session else None) or ""
         final_state = await asyncio.to_thread(
-            lab_report_pipeline.invoke, {"pdf_path": temp_path, "llm_enc_key": llm_enc_key}
+            lab_report_pipeline.invoke,
+            {
+                "pdf_path": temp_path,
+                "llm_enc_key": llm_enc_key,
+                **({"patient_name": _name_hint} if _name_hint else {}),
+            },
         )
 
         errors = final_state.get("errors", [])
         if errors and not final_state.get("doctor_summary"):
             return "Sorry, I had trouble reading that report. Please ask the clinic to check it manually."
+
+        # Enrich patient_info: fall back to the session patient_name when the PDF
+        # parser cannot extract a name (e.g. scanned/image-only PDFs).
+        _pi = final_state.get("patient_info") or {}
+        if not _pi.get("name") and _booking_session and _booking_session.patient_name:
+            _pi = {**_pi, "name": _booking_session.patient_name}
+            final_state = {**final_state, "patient_info": _pi}
 
         # Store PDF permanently before cleanup so we can share the original with the doctor
         document_id, _ = store_lab_pdf(temp_path)
@@ -214,18 +283,17 @@ async def handle_incoming_pdf(
 
         # Save lab record to DB so it appears in dashboard medical history
         try:
-            from app.services.store import get_session
             from app.services.patient_service import save_lab_record
-            booking = get_session(from_number)
-            clinic_id = booking.clinic_id if booking else None
             if clinic_id:
                 patient_info = final_state.get("patient_info") or {}
+                primary_doctor = doctor_numbers[0] if doctor_numbers else None
                 await save_lab_record(
                     clinic_id=clinic_id,
                     patient_phone=from_number,
                     patient_name=patient_info.get("name"),
                     lab_result=final_state,
                     pdf_url=pdf_url,
+                    doctor_phone=primary_doctor,
                 )
         except Exception as _le:
             print(f"[PDF] Could not save lab record: {_le}")
@@ -233,10 +301,15 @@ async def handle_incoming_pdf(
         criticals = final_state.get("criticals", [])
         if criticals:
             return (
-                "Your lab report has been received and forwarded to the doctor. "
-                "⚠️ Some critical values were detected — the doctor will reach out to you shortly."
+                "✅ Your lab report has been received and forwarded to the doctor.\n\n"
+                "⚠️ *Some critical values were detected.* The doctor will review and reach out to you shortly.\n\n"
+                "_If you don't hear back within a few hours, please call the clinic directly._"
             )
-        return "Your lab report has been received and forwarded to the doctor for review."
+        return (
+            "✅ Your lab report has been received and forwarded to the doctor for review. 🙏\n\n"
+            "_You will be notified once the doctor has reviewed it. "
+            "Feel free to message us if you need anything else._"
+        )
 
     except Exception as e:
         logger.error(f"Error handling PDF: {e!r}\n{traceback.format_exc()}")
@@ -248,7 +321,7 @@ async def handle_incoming_pdf(
 
 def _find_doctor_for_patient(from_number: str) -> list[str]:
     """Return doctor WhatsApp numbers to notify for this patient.
-    Checks the patient's most recent confirmed appointment first,
+    Prefers the doctor from the patient's most recent non-cancelled appointment,
     then falls back to all configured doctor numbers.
     """
     from app.services.store import get_appointments_by_number
@@ -257,8 +330,10 @@ def _find_doctor_for_patient(from_number: str) -> list[str]:
     try:
         if from_number:
             appointments = get_appointments_by_number(normalize_whatsapp_number(from_number))
-            if appointments:
-                most_recent = max(appointments, key=lambda a: a.confirmed_at)
+            # Only consider non-cancelled appointments (active = approved/confirmed)
+            valid = [a for a in appointments if getattr(a, "status", "active") != "cancelled"]
+            if valid:
+                most_recent = max(valid, key=lambda a: a.confirmed_at)
                 doctor_number = find_doctor_number(most_recent.doctor_name)
                 if doctor_number:
                     return [doctor_number]
@@ -292,7 +367,7 @@ def _forward_report_to_doctor(
 
     lines = [
         f"📋 *Lab Report — {patient_name}*",
-        f"Submitted by: {from_number}" if from_number else "",
+        f"📱 Patient: {from_number}" if from_number else "",
         "",
         summary,
         "",
@@ -320,7 +395,11 @@ def _forward_report_to_doctor(
 
     if lab_id:
         lines.append("")
-        lines.append(f"Reply *OK {lab_id}* to acknowledge — patient will be notified.")
+        lines.append(
+            f"✅ *To acknowledge this report, reply with:*\n"
+            f"`OK {lab_id}`\n"
+            f"_(Type it exactly as shown — the patient will be notified automatically)_"
+        )
 
     message = "\n".join(line for line in lines if line is not None)
 

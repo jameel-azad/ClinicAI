@@ -7,8 +7,10 @@ Run from D:\\ClinicAI:
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, ".")
+# Ensure the repo root is on sys.path so the top-level `app` package can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://clinicai:password@localhost:5432/clinicai")
 
 

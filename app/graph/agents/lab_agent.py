@@ -19,6 +19,22 @@ _NO_NAME_TOKENS = {
     "doctor", "dr", "appointment", "book", "cancel", "reschedule",
 }
 
+_ALREADY_SENT_PHRASES = frozenset({
+    "already sent", "already send", "sent already", "done sent",
+    "bhej diya", "bhej diya hai", "send kar diya", "de diya",
+    "already forwarded", "forwarded already", "send kiya", "bheja",
+})
+
+
+def _is_already_sent(message: str) -> bool:
+    """Return True when the user confirms they have already sent the PDF."""
+    msg = message.strip().lower()
+    if any(p in msg for p in _ALREADY_SENT_PHRASES):
+        return True
+    words = msg.split()
+    return len(words) <= 4 and "sent" in words
+
+
 _REPORT_TYPE_RE = re.compile(
     r"\b(x-?ray|blood\s*(?:test|report)?|urine(?:\s*test)?|ecg|ultrasound|"
     r"mri|ct\s*scan|sonography|echo|biopsy|pathology|thyroid|sugar|lipid|"
@@ -78,6 +94,32 @@ def lab_node(state: BookingState) -> dict:
     entities = state.get("extracted_entities") or {}
     incoming = (state.get("incoming_message") or "").strip()
     booking_state = session.state if session else "GREETING"
+
+    # ── 0. Handle LAB_PDF_REQUESTED: user replied after being asked to forward PDF ──
+    if booking_state == "LAB_PDF_REQUESTED":
+        if _is_already_sent(incoming):
+            # User confirmed they already sent the PDF — acknowledge and clear
+            if session:
+                session.state = "GREETING"
+                session.patient_name = None
+                session.doctor_name = None
+                session.lab_report_type = None
+            return {
+                "reply_message": (
+                    "Got it! Our team will process your report shortly. 🙏 "
+                    "Let us know if you need anything else."
+                ),
+                "session": session.model_dump() if session else session_dict,
+                "pipeline_log": ["lab_agent: user confirmed PDF already sent, acknowledged"],
+            }
+        else:
+            # User is starting a new lab request — reset and fall through to collection
+            if session:
+                session.state = "LAB_COLLECTING"
+                session.patient_name = None
+                session.doctor_name = None
+                session.lab_report_type = None
+            booking_state = "LAB_COLLECTING"
 
     # ── 1. Apply structured entities from classifier ─────────────────────────
     if session:
@@ -151,8 +193,10 @@ def lab_node(state: BookingState) -> dict:
             f"_Already sent the PDF? Our team will process it shortly._"
         )
         if session:
-            # Reset lab fields so a future lab share starts clean
-            session.state = "GREETING"
+            # Await the PDF forward; keep state so "already sent" is handled cleanly
+            session.state = "LAB_PDF_REQUESTED"
+            session.patient_name = None
+            session.doctor_name = None
             session.lab_report_type = None
 
     updated_session = session.model_dump() if session else session_dict

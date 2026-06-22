@@ -243,12 +243,27 @@ async def twilio_webhook(
     ):
         print(f"[Webhook] Received PDF: {MediaUrl0}")
         from app.services.pdf_service import handle_incoming_pdf
+        from app.services.store import get_session as _get_booking_session
 
-        reply = await handle_incoming_pdf(
-            MediaUrl0, from_number,
-            llm_enc_key=llm_fields.get("llm_enc_key"),
-            clinic_twilio_number=clinic_twilio_number,
+        _patient_session = await asyncio.to_thread(
+            _get_booking_session, from_number, clinic_id=clinic_id
         )
+        _booking_state = _patient_session.state if _patient_session else "GREETING"
+
+        if _booking_state in ("COLLECTING_INFO", "COLLECT_DOCTOR_PREFERENCE", "CONFIRM_SLOT"):
+            # Patient is mid-booking — PDF is likely a prescription, not a lab report.
+            # Keep the session intact and ask for text-based symptoms.
+            reply = (
+                "To continue with your appointment, please describe your symptoms in text 😊\n"
+                "_(e.g. 'fever, headache for 3 days')_\n\n"
+                "You can share lab reports separately once the booking is complete."
+            )
+        else:
+            reply = await handle_incoming_pdf(
+                MediaUrl0, from_number,
+                llm_enc_key=llm_fields.get("llm_enc_key"),
+                clinic_twilio_number=clinic_twilio_number,
+            )
     else:
         config = {"configurable": {"thread_id": from_number}}
         state_update = {

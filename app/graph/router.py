@@ -342,10 +342,16 @@ def route_after_session(
     # back to lab_dispatch_node even when the classifier returned a different
     # intent (e.g. "general_query" when the user replied with just a name or
     # "share with dr X" which can trip the injection guard).
-    if session_dict.get("state") == "LAB_COLLECTING":
+    if session_dict.get("state") in ("LAB_COLLECTING", "LAB_PDF_REQUESTED"):
         return "lab_dispatch_node"
 
+    # If the patient is mid-booking, followup/prescription intents must not hijack
+    # the booking flow — route them back to booking_dispatch_node instead.
     if intent in ("followup_query", "prescription_request"):
+        if session_dict.get("state") in (
+            "COLLECTING_INFO", "COLLECT_DOCTOR_PREFERENCE", "CONFIRM_SLOT"
+        ):
+            return "booking_dispatch_node"
         return "followup_dispatch_node"
 
     # Bug 2: appointment management intents must reach booking_agent even for

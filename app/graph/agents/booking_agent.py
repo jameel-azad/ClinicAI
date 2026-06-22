@@ -295,6 +295,40 @@ def _is_past_date(date_str: str | None) -> tuple[bool, str | None]:
         return False, None
 
 
+def _is_past_time_today(date_str: str | None, time_str: str | None) -> bool:
+    """Return True when date resolves to today AND the clock time has already passed."""
+    if not date_str or not time_str:
+        return False
+    try:
+        from app.services.google_calendar import resolve_date, is_vague_time
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        if is_vague_time(time_str):
+            return False
+        tz = ZoneInfo(os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata"))
+        resolved = resolve_date(date_str, tz)
+        if resolved is None:
+            return False
+        now = datetime.now(tz)
+        if resolved != now.date():
+            return False
+        m_t = re.match(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", time_str.strip().lower())
+        if not m_t:
+            return False
+        hour = int(m_t.group(1))
+        minute = int(m_t.group(2) or "0")
+        meridiem = m_t.group(3)
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        elif not meridiem:
+            return False  # ambiguous without am/pm — skip validation
+        return hour * 60 + minute <= now.hour * 60 + now.minute
+    except Exception:
+        return False
+
+
 def _validate_time_in_hours(time_str: str | None, doctor_name: str | None) -> str | None:
     """Return a user-facing error if time_str is outside doctor working hours, else None."""
     if not time_str:
@@ -824,6 +858,27 @@ def flow_node(state: BookingState) -> dict:
         booking_state = "GREETING"
         session.state = "GREETING"
 
+    # Reject times that have already passed for today's date.
+    # This catches: (a) date+time in the same message, and (b) time provided in a
+    # follow-up message when the date (today) was already captured in a prior turn.
+    if session.requested_date and session.requested_time and (
+        entities.get("requested_time") or entities.get("requested_date")
+    ):
+        if _is_past_time_today(session.requested_date, session.requested_time):
+            _time_display = session.requested_time
+            session.requested_time = None
+            session.state = "COLLECTING_INFO"
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "COLLECTING_INFO",
+                "reply_message": (
+                    f"Sorry, *{_time_display}* has already passed for today. "
+                    "Please choose a later time or book for another day.\n"
+                    "_(e.g. '7 PM', 'tomorrow at 5 PM')_"
+                ),
+                "pipeline_log": [f"flow_node: past time '{_time_display}' rejected for today"],
+            }
+
     missing = []
     if not session.patient_name: missing.append("patient_name")
     if not session.symptoms: missing.append("symptoms")
@@ -1088,7 +1143,22 @@ def reschedule_node(state: BookingState) -> dict:
                 "pipeline_log": ["reschedule_node: got date, need time"],
             }
 
-        # Both present — validate time against working hours
+        # Both present — reject if time is in the past for today's date
+        if _is_past_time_today(new_date, new_time):
+            _time_display = new_time
+            session.new_requested_time = None
+            return {
+                "session": session.model_dump(),
+                "current_booking_state": "RESCHEDULE_COLLECTING",
+                "reply_message": (
+                    f"Sorry, *{_time_display}* has already passed for today. "
+                    "Please choose a later time or book for another day.\n"
+                    "_(e.g. '7 PM', 'tomorrow at 5 PM')_"
+                ),
+                "pipeline_log": [f"reschedule_node: past time '{_time_display}' rejected for today"],
+            }
+
+        # Validate time against working hours
         _wh_msg = _validate_time_in_hours(new_time, session.doctor_name)
         if _wh_msg:
             session.new_requested_time = None
